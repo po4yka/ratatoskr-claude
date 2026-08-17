@@ -1,1 +1,24 @@
-# Repository-specific ignore rules will be added with implementation scaffolding.
+# Rust / Cargo build output
+target/
+*.rs.bk
+
+# Private fixtures: real personal/organization exports are never committed
+/fixtures/local/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs
+*.log
+
+# OS noise
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
