@@ -1,8 +1,19 @@
 # Ratatoskr Claude
 
-`ratatoskr-claude` is the Claude archive bounded context for Ratatoskr Next. It preserves official Claude exports and supported Compliance data as immutable evidence, normalizes projects, project knowledge, conversation graphs, files, and Artifacts, and publishes searchable local projections without relying on a live Claude browser session.
+`ratatoskr-claude` is the Claude archive bounded context for Ratatoskr. It preserves official Claude exports and supported Compliance data as immutable evidence, normalizes projects, project knowledge, conversation graphs, files, and Artifacts, and publishes searchable local projections without relying on a live Claude browser session.
 
 > **Status:** architecture bootstrap. Export importers, Compliance adapters, parser versions, persistence, and portable exports described below are planned and are not implemented yet.
+
+> [!IMPORTANT]
+> **Ratatoskr is in development.** No database holds data that has to survive a schema change.
+> While this status holds, these two rules replace what the documents below plan:
+>
+> - the API and the database keep their first version. There is no `v2` and no later major
+>   version.
+> - the database has no migrations. One schema definition exists, and a schema change edits it in
+>   place.
+>
+> Only the repository owner changes this status.
 
 ## Product boundary
 
