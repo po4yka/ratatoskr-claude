@@ -74,7 +74,7 @@ ratatoskr-claude/
 │   └── test-support/
 ├── services/
 │   └── claude/
-├── migrations/
+├── schema/
 ├── fixtures/
 │   ├── synthetic-exports/
 │   └── malformed-archives/
@@ -688,7 +688,7 @@ Project titles, messages, filenames, code, and provider IDs are not unbounded me
 
 ### Integration
 
-- SQLx migrations and transactions;
+- SQL schema initialization and transactions;
 - BlobStore raw archives, attachments, and Artifact versions;
 - interrupted/resumed import;
 - outbox/inbox replay;
@@ -710,7 +710,7 @@ Project titles, messages, filenames, code, and provider IDs are not unbounded me
 
 Use synthetic fixtures checked into Git. Real personal/organization exports remain in protected local fixture storage and are never included in PRs, logs, or CI artifacts.
 
-### Workspace end-to-end
+### Planned workspace end-to-end
 
 - Export Agent upload and operation progress;
 - raw-first import and completeness report;

@@ -11,4 +11,4 @@
 9. Add portable export, privacy deletion, reparse/parser migrations, and owner-fixture discovery.
 10. Add optional organization/Compliance adapter separately.
 
-Definition of Done: raw evidence survives, parsers are safe/versioned/loss-aware, knowledge/graphs/Artifact versions validate, references are honest, portable export works, privacy/migrations/events/tests and workspace flow pass.
+Definition of Done: raw evidence survives, parsers are safe/versioned/loss-aware, knowledge/graphs/Artifact versions validate, references are honest, portable export works, privacy/schema/events/tests and the planned workspace flow pass.

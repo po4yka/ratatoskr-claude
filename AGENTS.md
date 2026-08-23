@@ -36,7 +36,7 @@ The service must:
 
 ## Current phase
 
-The repository is in architecture bootstrap. Do not assume Rust crates, parsers, migrations, Compliance adapters, fixtures, or CI commands exist unless they are present in the checkout.
+The repository is in architecture bootstrap. Do not assume Rust crates, parsers, a database schema, Compliance adapters, fixtures, or CI commands exist unless they are present in the checkout.
 
 When creating initial implementation:
 
@@ -531,7 +531,7 @@ Publish stable archive references/events containing:
 
 `ratatoskr-knowledge` owns summaries, embeddings, decision extraction, entities, and semantic retrieval. Knowledge output never replaces archive evidence.
 
-## Persistence and migrations
+## Persistence and schema evolution
 
 Claude Archive writes only its owned schema.
 
@@ -562,7 +562,7 @@ Rules:
 - no cross-schema writes or foreign keys;
 - raw provider records remain separate from normalized projections;
 - stable provider IDs and snapshot/revision uniqueness are constrained;
-- migrations preserve raw links, graph/source/Artifact relationships, and completeness history;
+- schema changes preserve raw links, graph/source/Artifact relationships, and completeness history;
 - destructive cleanup cannot remove the sole evidence for normalized state;
 - large bytes use protected BlobStore references.
 
@@ -649,7 +649,7 @@ When implementation exists, include applicable tests for:
 - absence-without-deletion, access loss, and explicit tombstones;
 - Compliance cursors/deduplication/organization isolation;
 - portable export manifest/determinism/collisions;
-- outbox/inbox replay and migrations.
+- outbox/inbox replay and schema initialization.
 
 Use synthetic or aggressively minimized/redacted fixtures. Never commit personal Claude exports, organization data, private chats, files, or Artifacts to a public repository.
 
@@ -664,7 +664,7 @@ Use a workspace changeset when changing:
 - completeness/status semantics shown by clients;
 - Compliance authentication/deployment;
 - GitHub/Drive reference integration;
-- migration/backfill/portable export formats.
+- backfill and portable export formats.
 
 List producer/consumer compatibility, rollout, rollback, reprocessing/reindexing, storage, privacy, and user-visible completeness impact.
 
@@ -694,4 +694,4 @@ A task is complete only when:
 - no browser-session automation or inference responsibility is introduced;
 - portable output and downstream events preserve provenance;
 - relevant security/import/graph/Artifact/export tests pass;
-- contracts, migrations, telemetry, privacy, and cross-repository rollout are documented.
+- contracts, schema, telemetry, privacy, and cross-repository rollout are documented.

@@ -10,9 +10,9 @@ Required tests:
 - External reference local-backed-up truthfulness.
 - Completeness and missing/access/deletion semantics.
 - Deterministic portable export and safe paths/viewers.
-- Privacy deletion, authorization, migrations, outbox/inbox, redacted telemetry.
+- Privacy deletion, authorization, schema initialization, outbox/inbox, redacted telemetry.
 - Optional Compliance cursor/redelivery/auth with fakes.
-- Workspace export-agent -> Claude -> Knowledge flow.
+- Planned workspace Export Agent -> Claude -> Knowledge flow.
 
 No real personal export is committed; sanitized owner fixtures need explicit review.
 

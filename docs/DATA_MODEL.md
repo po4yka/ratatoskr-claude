@@ -1,6 +1,6 @@
 # Claude archive data model
 
-## Owned schema: `claude_archive.*`
+## Planned owned schema: `claude_archive.*`
 
 - `accounts`, organizations/workspaces, acquisition connections, optional encrypted Compliance credentials.
 - `exports`, raw hash/blob, acquisition, schema/parser, import/completeness metadata.

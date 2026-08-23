@@ -4,7 +4,7 @@
 - `REQUIREMENTS.md` — archive and reconstruction requirements.
 - `DOMAIN.md` — exports, projects, knowledge, graphs, files, Artifacts, and references.
 - `INTERFACES.md` — upload/import/events, BlobStore, Knowledge, and portable export boundaries.
-- `DATA_MODEL.md` — `claude_archive` schema.
+- `DATA_MODEL.md` — planned `claude_archive` schema.
 - `THREAT_MODEL.md` — archive, parser, privacy, Artifact, reference, and Compliance risks.
 - `TESTING.md` — fixtures, parser, graph/version, completeness, and security tests.
 - `IMPLEMENTATION_PLAN.md` — ordered archive vertical slices.

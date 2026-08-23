@@ -10,8 +10,8 @@
 >
 > - the API and the database keep their first version. There is no `v2` and no later major
 >   version.
-> - the database has no migrations. One schema definition exists, and a schema change edits it in
->   place.
+> - the database has no migrations. No schema exists yet. The first persistence change creates one
+>   schema definition, and later schema changes edit it in place.
 >
 > Only the repository owner changes this status.
 
@@ -80,7 +80,7 @@ The immutable archive, acquisition method, detected schema, parser version, warn
 
 ## Planned data model
 
-The service owns a `claude_archive.*` PostgreSQL schema:
+The service will own a `claude_archive.*` PostgreSQL schema when persistence is implemented:
 
 ```text
 claude_accounts
@@ -415,7 +415,7 @@ Every import records acquisition method, archive hash, detected schema, parser v
 
 ## Workspace integration
 
-`ratatoskr-workspace` pins this repository with compatible AI-archive contracts, Export Agent, Platform, Knowledge, Web, and Mobile commits. Real exports remain private test data; public CI uses synthetic archives and redacted structural fixtures.
+Planned: `ratatoskr-workspace` will pin this repository with compatible AI-archive contracts, Export Agent, Platform, Knowledge, Web, and Mobile commits. No workspace pin or integration profile exists for this service today. Real exports will remain private test data; public CI will use synthetic archives and redacted structural fixtures.
 
 ## Project status
 
