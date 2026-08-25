@@ -1,0 +1,44 @@
+# Claude archive schema
+
+## Purpose
+
+Defines the first-version PostgreSQL schema this service exclusively owns: the `claude_archive` schema holding accounts, organizations, exports, import runs, projects, project knowledge sources, conversation graphs, Artifacts, assets, revisions, tombstones, completeness evidence, and outbox/inbox records, created from a single in-place-edited definition with no migration tooling.
+
+## Requirements
+
+### Requirement: The owned schema is created from a single definition file
+
+A fresh database SHALL be fully provisioned by executing the repository's single schema definition, producing every `claude_archive` table the service owns, and the definition SHALL NOT depend on any prior schema state or migration history.
+
+#### Scenario: Fresh database provisions every owned table
+
+- **WHEN** the schema definition executes against an empty database
+- **THEN** the `claude_archive` schema exists containing the owned tables for accounts, organizations, exports, import runs, projects, project sources, conversations, messages, message relations, content parts, artifacts, artifact versions, assets, revisions, tombstones, completeness reports, and outbox/inbox
+
+#### Scenario: Provisioning is repeatable across throwaway databases
+
+- **WHEN** the schema definition executes against two independent empty databases
+- **THEN** both succeed and expose the same set of owned tables
+
+### Requirement: The service writes nothing outside its schema
+
+The definition SHALL create objects only inside the `claude_archive` schema, and every relationship it declares SHALL stay within that schema with no cross-schema foreign keys or shared-table writes.
+
+#### Scenario: Definition creates no objects outside claude_archive
+
+- **WHEN** the schema definition executes against an empty database
+- **THEN** no tables are created outside the `claude_archive` schema and every foreign key resolves to a table inside it
+
+### Requirement: Provider identities are stably constrained
+
+The definition SHALL constrain stable provider identity pairs so repeated observations of the same external record cannot create duplicates: export archives by content hash, and owned records by their external identity within their parent scope.
+
+#### Scenario: Duplicate archive hash is rejected
+
+- **WHEN** a second export row is inserted with the same archive content hash as an existing row
+- **THEN** the insert violates a uniqueness constraint and fails
+
+#### Scenario: Duplicate external identity within a scope is rejected
+
+- **WHEN** a record is inserted whose external provider identifier already exists for the same parent scope, such as a conversation UUID inside one account
+- **THEN** the insert violates a uniqueness constraint and fails

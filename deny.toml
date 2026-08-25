@@ -1,0 +1,44 @@
+# What `cargo deny check` enforces, and why each section is here rather than left to taste.
+#
+# The sections mirror ratatoskr-platform and ratatoskr-github so the three files can be compared
+# rather than reasoned about separately.
+
+[advisories]
+version = 2
+yanked = "deny" # a yanked lockfile entry is a build that cannot be reproduced
+
+[licenses]
+version = 2
+# Every expression the current graph resolves to. The same list the other Rust repositories use.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "MIT-0",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+unused-allowed-license = "allow"
+
+[bans]
+# Two versions of one crate is usually accidental rather than wrong, so this warns rather than
+# fails.
+multiple-versions = "warn"
+
+# Replacement allocators are denied because of the deployment target's page size: jemalloc,
+# mimalloc and snmalloc all size internal structures from a page size decided at BUILD time, while
+# the system allocator reads it at run time.
+deny = [
+    { name = "tikv-jemallocator" },
+    { name = "jemallocator" },
+    { name = "mimalloc" },
+    { name = "snmalloc-rs" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+required-git-spec = "rev"
+allow-git = []

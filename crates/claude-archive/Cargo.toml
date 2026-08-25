@@ -1,0 +1,33 @@
+[package]
+name = "ratatoskr-claude-archive"
+description = "Domain library for the Ratatoskr Claude bounded context."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[features]
+test-support = []
+
+[dev-dependencies]
+# Self-dependency so integration tests see the test-support module while the
+# default feature set stays clean for every other consumer.
+ratatoskr-claude-archive = { path = ".", features = ["test-support"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true

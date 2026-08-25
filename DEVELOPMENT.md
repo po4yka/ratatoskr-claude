@@ -1,24 +1,39 @@
 # Developing Ratatoskr Claude Archive
 
-> Status: Proposed  
-> Last reviewed: 2026-08-20
+Status: Accepted (implementation plan item 1 complete). Last reviewed: 2026-08-25.
 
-Architecture bootstrap: export importer, parser registry, schema, Compliance adapter, Artifact handling, and portable exporter are not implemented.
+The service scaffold exists: typed strict configuration, structured telemetry, operator health routes, typed errors, a content-addressed BlobStore adapter, and the first-version `claude_archive` schema applied at startup. Export receipt/import, parser registry, Compliance adapter, Artifact handling, and portable exporter are not implemented yet.
 
-## Intended toolchain
+## Toolchain
 
-Rust/Tokio, safe archive handling, streaming SHA-256, SQLx/PostgreSQL, content-addressed BlobStore, Serde/JSON Schema, NATS, fixture-driven parsers, tracing, and testcontainers.
+Rust 1.97.0 (pinned in `rust-toolchain.toml`), Tokio, axum, SQLx/PostgreSQL without the migrate feature, tracing with JSON logs to stderr plus Prometheus metrics, and a local content-addressed BlobStore. The database schema is one file (`schema.sql`) applied under an advisory lock; there are no migrations while the development status holds.
 
 ## Code size limits
 
-There is no code here yet, so no limit is enforced yet. The commit that brings the first manifest brings the configuration that carries the limits with it: `clippy.toml` beside a `Cargo.toml`, `eslint.config.js` beside a `package.json`. `fleet.yml` fails the gate when a manifest arrives without one, so the rule has a check behind it and not only this paragraph.
+`clippy.toml` sits beside `Cargo.toml` carrying the fleet thresholds: functions at most 100 lines, signatures at most 7 arguments, block nesting at most depth 5, MSRV-aware suggestions, and `std::env::var`/`var_os` disallowed outside the config module. `.github/workflows/ci.yml` additionally fails any `.rs` file longer than 850 lines. An exception is a site-level `#[expect(...)]` with a reason, never a raised threshold.
 
-`ratatoskr-workspace/docs/QUALITY_GATES.md` holds the numbers the repositories with code use today, the command that measured each one, and the limits that were rejected with the reason. Read it before you choose numbers, then measure this tree. Each limit is set at the worst case the tree already has, so that the check fails on a regression and not on work that has not been done yet.
+### Rust — also the CI gate
 
-## Current validation
+```bash
+cargo fetch --locked
+cargo deny --locked check
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --workspace --locked
+cargo test --workspace --locked
+cargo test --workspace --locked --doc
+cargo build --workspace --locked --release
+```
 
-This repository has no product manifest or `.github/workflows/ci.yml` yet. Run the current docs-only
-gate locally:
+`.github/workflows/ci.yml` runs this list against PostgreSQL 17 (service container in CI,
+`compose.yaml` on a laptop: user/password/database `claude`, published on `127.0.0.1:5438`). The
+suite creates disposable databases from the embedded schema per test; without the server the suite
+fails rather than skips. CI additionally runs the 850-line file ratchet and a guard asserting this
+command list is byte-identical to `.github/workflows/ci.yml`.
+
+## Docs-only OpenSpec gate
+
+In addition to the product gate:
 
 ```bash
 git diff --check
@@ -26,11 +41,23 @@ openspec validate --all --strict
 openspec validate --archived
 ```
 
-`.github/workflows/openspec.yml` runs the two OpenSpec commands in CI. The first-manifest rule in
-`.github/workflows/fleet.yml` requires the first product manifest to add a product `ci.yml` that
-invokes a test. For a Rust or Node manifest, it also requires `clippy.toml` or
-`eslint.config.js`, respectively; it does not prove that product CI invokes the linter. The
-docs-only/OpenSpec gate remains in addition to product CI.
+`.github/workflows/openspec.yml` runs the two OpenSpec commands in CI.
+
+## Local run
+
+```bash
+docker compose up -d
+cargo run -p ratatoskr-claude-archive-service
+# operator plane on 127.0.0.1:9084: /health/live /health/ready /metrics /version
+```
+
+Configuration comes from `RATATOSKR__*` environment variables; required:
+`RATATOSKR__STORAGE__BLOB_ROOT` and `RATATOSKR__STORAGE__DATABASE_URL`. Defaults: operator listener
+`127.0.0.1:9084`, log filter `info`, 8 database connections, 5 s acquire timeout, 10 s shutdown
+bound. `<binary> check-config` validates and prints the redacted effective configuration.
+
+Tests use disposable databases created from `schema.sql`; override their location with
+`CLAUDE_ARCHIVE_TEST_DATABASE_URL`. The suite never skips when the server is missing — it fails.
 
 ## Workflow
 
@@ -40,7 +67,7 @@ docs-only/OpenSpec gate remains in addition to product CI.
 4. Reconcile projects, instructions, project knowledge, conversation graphs, files, Artifacts/versions, and external references without overwriting history.
 5. Test archive limits, graph/version integrity, missing assets, interruption, privacy deletion, Compliance cursors, and portable export.
 
-The first scaffold PR must document exact commands. Default CI uses synthetic fixtures and never Claude session cookies or personal exports.
+CI uses synthetic fixtures and never Claude session cookies or personal exports.
 
 ## What a clone needs before you plan a change
 

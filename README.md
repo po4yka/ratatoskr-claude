@@ -2,7 +2,7 @@
 
 `ratatoskr-claude` is the Claude archive bounded context for Ratatoskr. It preserves official Claude exports and supported Compliance data as immutable evidence, normalizes projects, project knowledge, conversation graphs, files, and Artifacts, and publishes searchable local projections without relying on a live Claude browser session.
 
-> **Status:** architecture bootstrap. Export importers, Compliance adapters, parser versions, persistence, and portable exports described below are planned and are not implemented yet.
+> **Status:** implementation plan item 1 is complete: a Rust service runs locally against PostgreSQL with typed strict configuration, structured telemetry, operator health routes (`/health/live`, `/health/ready`, `/metrics`, `/version`), typed errors, a content-addressed BlobStore adapter, and the first-version `claude_archive` schema applied at startup. Export receipt/import, parsers, Compliance adapters, completeness, events, and portable exports described below are planned and are not implemented yet.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -419,4 +419,4 @@ Planned: `ratatoskr-workspace` will pin this repository with compatible AI-archi
 
 ## Project status
 
-This README defines the intended Claude archive architecture. No importer, parser, Compliance connector, database schema, Artifact model, or portable export generator exists yet.
+The process foundation (configuration, telemetry, operator health, typed errors, content-addressed blob storage, owned `claude_archive` schema) is implemented and gated by CI; `schema.sql` is the single editable definition of that first version. Export receipt and import, parsers, the event machinery behind those behaviors, Compliance connectors, and portable export generation do not exist yet; the sections above describe the intended Claude archive architecture. `DEVELOPMENT.md` records the exact local and CI gate commands.

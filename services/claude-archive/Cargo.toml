@@ -1,0 +1,34 @@
+[package]
+name = "ratatoskr-claude-archive-service"
+description = "Deployable Ratatoskr Claude Archive service process."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ratatoskr_claude_archive_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ratatoskr-claude-archive"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+http-body-util.workspace = true
+ratatoskr-claude-archive.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Self-package tests reach the disposable-database and scratch helpers.
+ratatoskr-claude-archive = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true
