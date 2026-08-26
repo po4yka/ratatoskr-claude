@@ -108,3 +108,49 @@ fn unknown_key_rejected() {
         violation.rule
     );
 }
+
+#[test]
+fn max_archive_bytes_defaults_to_ten_gibibytes() {
+    let config =
+        Config::from_environment(minimal_environment()).expect("the minimal environment is valid");
+
+    assert_eq!(
+        config.limits.max_archive_bytes,
+        10 * 1024 * 1024 * 1024,
+        "the archive cap defaults to 10 GiB without configuration"
+    );
+}
+
+#[test]
+fn max_archive_bytes_accepts_configured_value() {
+    let mut environment = minimal_environment();
+    environment.push(("RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES", "1024"));
+
+    let config = Config::from_environment(environment)
+        .expect("a positive archive cap is a valid configuration");
+
+    assert_eq!(
+        config.limits.max_archive_bytes, 1024,
+        "the configured cap replaces the default"
+    );
+}
+
+#[test]
+fn max_archive_bytes_rejects_non_positive_value() {
+    let mut environment = minimal_environment();
+    environment.push(("RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES", "0"));
+
+    let error = Config::from_environment(environment)
+        .expect_err("an archive cap of zero must refuse to load");
+
+    let violation = error
+        .violations
+        .iter()
+        .find(|violation| violation.key == "RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES")
+        .expect("the refusal names the offending field");
+    assert!(
+        violation.rule.contains("positive"),
+        "the rule states the value must be positive, got: {}",
+        violation.rule
+    );
+}

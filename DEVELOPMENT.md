@@ -1,8 +1,8 @@
 # Developing Ratatoskr Claude Archive
 
-Status: Accepted (implementation plan item 1 complete). Last reviewed: 2026-08-25.
+Status: Accepted (implementation plan items 1 and 2 complete). Last reviewed: 2026-08-26.
 
-The service scaffold exists: typed strict configuration, structured telemetry, operator health routes, typed errors, a content-addressed BlobStore adapter, and the first-version `claude_archive` schema applied at startup. Export receipt/import, parser registry, Compliance adapter, Artifact handling, and portable exporter are not implemented yet.
+The service scaffold exists: typed strict configuration, structured telemetry, operator health routes, typed errors, a content-addressed BlobStore adapter with capped streaming ingest, and the first-version `claude_archive` schema applied at startup. Authenticated tenant-scoped archive receipt exists: claims verify against known accounts/organizations before storage, archives hash and count while streaming under `RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES`, raw bytes land write-once, re-delivered digests report an explicit duplicate outcome, and each accepted receipt starts a durable crash-resumable import run driven by guarded state transitions. Safe container inspection/extraction, schema detection, parser registry, Compliance adapter, Artifact handling, and portable exporter are not implemented yet.
 
 ## Toolchain
 
@@ -54,7 +54,8 @@ cargo run -p ratatoskr-claude-archive-service
 Configuration comes from `RATATOSKR__*` environment variables; required:
 `RATATOSKR__STORAGE__BLOB_ROOT` and `RATATOSKR__STORAGE__DATABASE_URL`. Defaults: operator listener
 `127.0.0.1:9084`, log filter `info`, 8 database connections, 5 s acquire timeout, 10 s shutdown
-bound. `<binary> check-config` validates and prints the redacted effective configuration.
+bound, and a 10 GiB maximum accepted archive size (`RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES`).
+`<binary> check-config` validates and prints the redacted effective configuration.
 
 Tests use disposable databases created from `schema.sql`; override their location with
 `CLAUDE_ARCHIVE_TEST_DATABASE_URL`. The suite never skips when the server is missing — it fails.

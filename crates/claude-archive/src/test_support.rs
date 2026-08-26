@@ -38,6 +38,18 @@ pub fn admin_url() -> String {
     }
 }
 
+/// A connectable URL for one named disposable database on the same server
+/// as [`admin_url`], used when a test must reopen a database the way a fresh
+/// process would.
+#[must_use]
+pub fn database_url(name: &str) -> String {
+    let base = admin_url();
+    match base.rsplit_once('/') {
+        Some((prefix, _old_name)) => format!("{prefix}/{name}"),
+        None => base,
+    }
+}
+
 /// An isolated disposable archive database.
 #[derive(Debug)]
 pub struct TestDatabase {

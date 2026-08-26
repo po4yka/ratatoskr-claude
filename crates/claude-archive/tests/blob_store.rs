@@ -9,6 +9,7 @@
     reason = "integration-test scaffolding: a failed setup step must fail the test loudly"
 )]
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -17,6 +18,20 @@ use ratatoskr_claude_archive::{BlobRef, BlobStore, DigestAlgorithm, MediaType, S
 
 const OWNER: &str = "ratatoskr-claude-archive";
 const MEDIA_TYPE: &str = "application/zip";
+
+/// Independent one-shot SHA-256 hex encoding, computed outside the
+/// implementation under test and used to predict where objects must land.
+fn one_shot_digest_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let mut encoded = String::new();
+    for byte in hasher.finalize() {
+        let _ignored = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
 
 fn open_store(label: &str) -> (std::path::PathBuf, BlobStore) {
     let root = temp_root(label);
@@ -225,5 +240,133 @@ fn foreign_reference_is_refused() {
         .read(&reference)
         .expect_err("a reference from another owner must not resolve here");
     assert!(matches!(error, StoreError::InvalidIdentity));
+    remove(&root);
+}
+
+/// A deterministic payload several internal chunks long plus a ragged
+/// remainder, so incremental hashing crosses chunk boundaries unevenly.
+fn multi_chunk_payload(chunks: usize, remainder: usize) -> Vec<u8> {
+    let length = chunks * 65_536 + remainder;
+    (0..length)
+        .map(|index| u8::try_from(index % 251).unwrap_or(0))
+        .collect()
+}
+
+#[test]
+fn streamed_ingest_matches_buffered_reference_across_chunk_boundaries() {
+    let (root, store) = open_store("stream-match");
+    let payload = multi_chunk_payload(3, 137);
+
+    let streamed = store
+        .store_stream(
+            MediaType::parse(MEDIA_TYPE).unwrap(),
+            std::io::Cursor::new(&payload),
+            u64::try_from(payload.len()).unwrap(),
+        )
+        .expect("streaming succeeds within the cap");
+    let buffered = store
+        .store(MediaType::parse(MEDIA_TYPE).unwrap(), &payload)
+        .expect("buffered storing succeeds");
+
+    assert_eq!(
+        streamed, buffered,
+        "both paths address identical bytes identically"
+    );
+    let files = object_files(&root);
+    assert_eq!(files.len(), 1, "exactly one object backs both paths");
+    remove(&root);
+}
+
+#[test]
+fn streamed_ingest_refuses_oversized_stream_and_leaves_nothing_complete() {
+    let (root, store) = open_store("stream-cap");
+    let payload = multi_chunk_payload(1, 5001); // well past a 1024-byte cap
+    let expected_digest = one_shot_digest_hex(&payload);
+
+    let refused = store
+        .store_stream(
+            MediaType::parse(MEDIA_TYPE).unwrap(),
+            std::io::Cursor::new(&payload),
+            1024,
+        )
+        .expect_err("a stream past its cap must be refused");
+
+    match &refused {
+        StoreError::LimitExceeded { limit_bytes } => {
+            assert_eq!(*limit_bytes, 1024, "the refusal names the cap");
+        }
+        other => panic!("expected a limit-exceeded refusal, got: {other}"),
+    }
+
+    // Nothing durable: no object under the would-be digest, staging empty.
+    let would_be = BlobRef {
+        owner_service: OWNER.to_owned(),
+        algorithm: DigestAlgorithm::Sha256,
+        digest_hex: expected_digest.clone(),
+        media_type: MediaType::parse(MEDIA_TYPE).unwrap(),
+        length_bytes: u64::try_from(payload.len()).unwrap(),
+    };
+    let read_attempt = store.read(&would_be);
+    assert!(
+        matches!(read_attempt, Err(StoreError::Missing { .. })),
+        "no object may exist for the refused stream"
+    );
+    let staging_entries =
+        fs::read_dir(root.join("staging")).expect("staging directory is listable");
+    assert_eq!(
+        staging_entries.count(),
+        0,
+        "the refused attempt leaves no staged files behind"
+    );
+
+    remove(&root);
+}
+
+#[test]
+fn streamed_ingest_refuses_empty_stream() {
+    let (root, store) = open_store("stream-empty");
+    let empty: Vec<u8> = Vec::new();
+
+    let refused = store
+        .store_stream(
+            MediaType::parse(MEDIA_TYPE).unwrap(),
+            std::io::Cursor::new(&empty),
+            1024,
+        )
+        .expect_err("an empty stream has nothing worth archiving");
+
+    assert!(
+        matches!(refused, StoreError::EmptyInput),
+        "expected an empty-input refusal, got: {refused}"
+    );
+    remove(&root);
+}
+
+#[test]
+fn streamed_ingest_preserves_write_once_deduplication() {
+    let (root, store) = open_store("stream-dedup");
+    let payload = multi_chunk_payload(2, 91);
+
+    let first = store
+        .store_stream(
+            MediaType::parse(MEDIA_TYPE).unwrap(),
+            std::io::Cursor::new(&payload),
+            u64::try_from(payload.len()).unwrap(),
+        )
+        .expect("the first streamed ingest succeeds");
+    let second = store
+        .store_stream(
+            MediaType::parse(MEDIA_TYPE).unwrap(),
+            std::io::Cursor::new(&payload),
+            u64::try_from(payload.len()).unwrap(),
+        )
+        .expect("re-streaming identical bytes is idempotent success");
+
+    assert_eq!(first, second, "both ingests return the same reference");
+    assert_eq!(
+        object_files(&root).len(),
+        1,
+        "exactly one object exists for the digest"
+    );
     remove(&root);
 }

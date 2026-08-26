@@ -70,6 +70,9 @@ pub struct Limits {
     pub database_acquire_timeout_ms: u64,
     /// Maximum graceful shutdown duration.
     pub shutdown_timeout_ms: u64,
+    /// Maximum accepted archive size in bytes. Receipt refuses a stream that
+    /// exceeds it mid-flight, before anything durable is written.
+    pub max_archive_bytes: u64,
 }
 
 /// One configuration violation. The offending key and the rule it broke, and
@@ -233,6 +236,10 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
             Ok(parsed) => config.limits.shutdown_timeout_ms = parsed,
             Err(rule) => violations.push(refused(rule)),
         },
+        "RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES" => match parse_positive::<u64>(value) {
+            Ok(parsed) => config.limits.max_archive_bytes = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
         _ => violations.push(refused("is not recognized")),
     }
 }
@@ -267,6 +274,7 @@ impl Default for Config {
                 database_connections: 8,
                 database_acquire_timeout_ms: 5_000,
                 shutdown_timeout_ms: 10_000,
+                max_archive_bytes: 10 * 1024 * 1024 * 1024,
             },
         }
     }

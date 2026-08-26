@@ -28,6 +28,7 @@ test-support = []
 # default feature set stays clean for every other consumer.
 ratatoskr-claude-archive = { path = ".", features = ["test-support"] }
 serde_json.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true

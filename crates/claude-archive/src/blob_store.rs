@@ -121,6 +121,15 @@ pub enum StoreError {
     /// The reference does not belong to this store.
     #[error("the reference does not belong to this blob store")]
     InvalidIdentity,
+    /// A streamed ingest delivered more bytes than its declared maximum.
+    #[error("the stream exceeded its declared limit of {limit_bytes} bytes")]
+    LimitExceeded {
+        /// The declared maximum, named by the refusal.
+        limit_bytes: u64,
+    },
+    /// A streamed ingest delivered no bytes at all.
+    #[error("the stream delivered no bytes")]
+    EmptyInput,
 }
 
 /// The content-addressed store rooted at this service's own directory.
@@ -158,47 +167,48 @@ impl BlobStore {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         let digest_hex = encode_digest(&hasher.finalize());
-        let target = self.path_for_digest(&digest_hex);
 
-        if target.exists() {
-            // Deduplicate only when the resident bytes really are these bytes;
-            // anything else under the key is foreign content that must never
-            // be replaced.
-            if Self::verify_resident(&target, bytes.len(), &digest_hex)? {
-                return Ok(Self::reference(media_type, &digest_hex, bytes.len()));
-            }
-            return Err(StoreError::Collision {
-                digest_hex: digest_hex.clone(),
-            });
-        }
-
-        let staging_path = self
-            .root
-            .join("staging")
-            .join(format!("{}", Uuid::now_v7()));
+        let staging_path = self.root.join("staging").join(Uuid::now_v7().to_string());
         let staged = Self::stage(&staging_path, bytes)?;
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if let Err(error) = fs::hard_link(&staging_path, &target) {
-            if error.kind() != io::ErrorKind::AlreadyExists {
-                let _ignored = fs::remove_file(&staging_path);
-                return Err(error.into());
-            }
-            // Another writer placed an object here first. It is acceptable
-            // only when it is exactly these bytes.
-            let matching = Self::verify_resident(&target, bytes.len(), &digest_hex)?;
-            let _ignored = fs::remove_file(&staging_path);
-            if !matching {
-                return Err(StoreError::Collision {
-                    digest_hex: digest_hex.clone(),
-                });
-            }
-        }
+        let placed = self.publish_staged(media_type, &staging_path, &digest_hex, bytes.len());
         drop(staged);
         let _ignored = fs::remove_file(&staging_path);
+        placed
+    }
 
-        Ok(Self::reference(media_type, &digest_hex, bytes.len()))
+    /// Stores a byte stream, hashing and counting it while it arrives.
+    ///
+    /// The stream is consumed in bounded chunks, so memory stays flat no
+    /// matter how large the archive claims to be. The declared maximum is
+    /// enforced mid-stream: the moment it is exceeded the ingest fails, the
+    /// staged file is removed, and nothing durable exists for those bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::LimitExceeded`] when the stream passes
+    /// `max_bytes`, [`StoreError::EmptyInput`] when it delivers nothing,
+    /// [`StoreError::Collision`] when an object under the digest already
+    /// holds different bytes, and [`StoreError`] propagates filesystem
+    /// failures from staging and placement.
+    pub fn store_stream(
+        &self,
+        media_type: MediaType,
+        mut reader: impl io::Read,
+        max_bytes: u64,
+    ) -> Result<BlobRef, StoreError> {
+        let staging_path = self.root.join("staging").join(Uuid::now_v7().to_string());
+        let (digest_hex, total) = match stage_stream(&staging_path, &mut reader, max_bytes) {
+            Ok(pair) => pair,
+            Err(error) => {
+                let _ignored = fs::remove_file(&staging_path);
+                return Err(error);
+            }
+        };
+
+        let length = usize::try_from(total).unwrap_or(usize::MAX);
+        let placed = self.publish_staged(media_type, &staging_path, &digest_hex, length);
+        let _ignored = fs::remove_file(&staging_path);
+        placed
     }
 
     /// Reads back the bytes a reference names, verifying their integrity.
@@ -254,6 +264,52 @@ impl BlobStore {
             }
             Err(_) => false,
         }
+    }
+
+    /// Places a fully staged, fully hashed file at its content address.
+    ///
+    /// Both ingest paths converge here. A resident object under the digest is
+    /// accepted only when it holds exactly these bytes (idempotent
+    /// deduplication); anything else is a collision that never rewrites it.
+    fn publish_staged(
+        &self,
+        media_type: MediaType,
+        staging_path: &Path,
+        digest_hex: &str,
+        length: usize,
+    ) -> Result<BlobRef, StoreError> {
+        let target = self.path_for_digest(digest_hex);
+        if target.exists() {
+            // Deduplicate only when the resident bytes really are these bytes;
+            // anything else under the key is foreign content that must never
+            // be replaced.
+            let matching = Self::verify_resident(&target, length, digest_hex)?;
+            if matching {
+                return Ok(Self::reference(media_type, digest_hex, length));
+            }
+            return Err(StoreError::Collision {
+                digest_hex: digest_hex.to_owned(),
+            });
+        }
+
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if let Err(error) = fs::hard_link(staging_path, &target) {
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(error.into());
+            }
+            // Another writer placed an object here first. It is acceptable
+            // only when it is exactly these bytes.
+            let matching = Self::verify_resident(&target, length, digest_hex)?;
+            if !matching {
+                return Err(StoreError::Collision {
+                    digest_hex: digest_hex.to_owned(),
+                });
+            }
+        }
+
+        Ok(Self::reference(media_type, digest_hex, length))
     }
 
     /// The filesystem location of one digest inside this store.
@@ -326,6 +382,54 @@ impl BlobStore {
 fn split_digest(digest_hex: &str) -> (&str, &str) {
     let boundary = 2.min(digest_hex.len());
     digest_hex.split_at(boundary)
+}
+
+/// The size of one streaming ingest chunk: large enough that syscall count
+/// stays modest for archive-sized uploads, small enough that memory stays
+/// flat no matter how large the stream claims to be.
+const INGEST_CHUNK_BYTES: usize = 65_536;
+
+/// Consumes `reader` into a staging file at `staging_path`, folding an
+/// incremental SHA-256 over everything delivered. Refuses mid-stream once
+/// the total passes `max_bytes`, and refuses a stream that delivers nothing.
+///
+/// The caller owns the staged file: it is removed on every error path the
+/// caller sees, and left only behind a crashed process, where its staging
+/// location keeps it inert.
+fn stage_stream(
+    staging_path: &Path,
+    reader: &mut impl io::Read,
+    max_bytes: u64,
+) -> Result<(String, u64), StoreError> {
+    let mut file = fs::File::create(staging_path)?;
+    let mut hasher = Sha256::new();
+    let mut total: u64 = 0;
+    let mut chunk = vec![0u8; INGEST_CHUNK_BYTES];
+    loop {
+        let filled = reader.read(&mut chunk)?;
+        if filled == 0 {
+            break;
+        }
+        total += u64::try_from(filled).unwrap_or(u64::MAX);
+        if total > max_bytes {
+            return Err(StoreError::LimitExceeded {
+                limit_bytes: max_bytes,
+            });
+        }
+        let filled_bytes = chunk.get(..filled).ok_or_else(|| {
+            StoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a read reported more bytes than its buffer holds",
+            ))
+        })?;
+        hasher.update(filled_bytes);
+        file.write_all(filled_bytes)?;
+    }
+    if total == 0 {
+        return Err(StoreError::EmptyInput);
+    }
+    file.sync_all()?;
+    Ok((encode_digest(&hasher.finalize()), total))
 }
 
 /// Whether `digest_hex` is 64 lowercase hexadecimal characters.
