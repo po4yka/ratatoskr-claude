@@ -154,3 +154,63 @@ fn max_archive_bytes_rejects_non_positive_value() {
         violation.rule
     );
 }
+
+#[test]
+fn archive_inspection_limits_default_to_safe_bounds() {
+    let config =
+        Config::from_environment(minimal_environment()).expect("the minimal environment is valid");
+
+    assert_eq!(config.limits.max_archive_entries, 50_000);
+    assert_eq!(config.limits.max_entry_bytes, 1024 * 1024 * 1024);
+    assert_eq!(
+        config.limits.max_total_extracted_bytes,
+        10 * 1024 * 1024 * 1024
+    );
+    assert_eq!(config.limits.max_compression_ratio, 100);
+}
+
+#[test]
+fn archive_inspection_limits_accept_valid_environment_overrides() {
+    let mut environment = minimal_environment();
+    environment.extend([
+        ("RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRIES", "12"),
+        ("RATATOSKR__LIMITS__MAX_ENTRY_BYTES", "1024"),
+        ("RATATOSKR__LIMITS__MAX_TOTAL_EXTRACTED_BYTES", "4096"),
+        ("RATATOSKR__LIMITS__MAX_COMPRESSION_RATIO", "8"),
+    ]);
+
+    let config = Config::from_environment(environment)
+        .expect("positive internally consistent inspection limits are valid");
+
+    assert_eq!(config.limits.max_archive_entries, 12);
+    assert_eq!(config.limits.max_entry_bytes, 1024);
+    assert_eq!(config.limits.max_total_extracted_bytes, 4096);
+    assert_eq!(config.limits.max_compression_ratio, 8);
+}
+
+#[test]
+fn archive_inspection_limits_reject_zero_or_inconsistent_values() {
+    let mut environment = minimal_environment();
+    environment.extend([
+        ("RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRIES", "0"),
+        ("RATATOSKR__LIMITS__MAX_ENTRY_BYTES", "4096"),
+        ("RATATOSKR__LIMITS__MAX_TOTAL_EXTRACTED_BYTES", "1024"),
+        ("RATATOSKR__LIMITS__MAX_COMPRESSION_RATIO", "0"),
+    ]);
+
+    let error = Config::from_environment(environment)
+        .expect_err("zero or inconsistent inspection limits must refuse to load");
+
+    assert!(error.violations.iter().any(|violation| {
+        violation.key == "RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRIES"
+            && violation.rule.contains("positive")
+    }));
+    assert!(error.violations.iter().any(|violation| {
+        violation.key == "RATATOSKR__LIMITS__MAX_TOTAL_EXTRACTED_BYTES"
+            && violation.rule.contains("at least")
+    }));
+    assert!(error.violations.iter().any(|violation| {
+        violation.key == "RATATOSKR__LIMITS__MAX_COMPRESSION_RATIO"
+            && violation.rule.contains("positive")
+    }));
+}

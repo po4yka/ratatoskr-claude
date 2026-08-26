@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -218,13 +218,9 @@ impl BlobStore {
     /// Returns [`StoreError`] when the object is missing or no longer hashes
     /// to its recorded digest.
     pub fn read(&self, reference: &BlobRef) -> Result<Vec<u8>, StoreError> {
-        let target = self.resolve(reference)?;
-        let bytes = fs::read(target)?;
-        if !Self::matches_digest(&bytes, reference) {
-            return Err(StoreError::Mismatch {
-                digest_hex: reference.digest_hex.clone(),
-            });
-        }
+        let mut file = self.open_verified(reference)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
         Ok(bytes)
     }
 
@@ -234,15 +230,7 @@ impl BlobStore {
     ///
     /// Returns [`StoreError`] like [`BlobStore::read`].
     pub fn verify(&self, reference: &BlobRef) -> Result<(), StoreError> {
-        let target = self.resolve(reference)?;
-        let bytes = fs::read(target)?;
-        if Self::matches_digest(&bytes, reference) {
-            Ok(())
-        } else {
-            Err(StoreError::Mismatch {
-                digest_hex: reference.digest_hex.clone(),
-            })
-        }
+        self.open_verified(reference).map(|_| ())
     }
 
     /// Answers whether the store can hold bytes right now.
@@ -335,6 +323,22 @@ impl BlobStore {
         Ok(target)
     }
 
+    /// Opens one verified object at its beginning without materializing it.
+    ///
+    /// Archive consumers use the returned handle to apply their own streaming
+    /// and seeking limits while preserving the `BlobStore` integrity check.
+    pub(crate) fn open_verified(&self, reference: &BlobRef) -> Result<fs::File, StoreError> {
+        let target = self.resolve(reference)?;
+        let mut file = fs::File::open(target)?;
+        if !Self::matches_file(&mut file, reference)? {
+            return Err(StoreError::Mismatch {
+                digest_hex: reference.digest_hex.clone(),
+            });
+        }
+        file.rewind()?;
+        Ok(file)
+    }
+
     /// Whether resident bytes at `path` have exactly this length and digest.
     fn verify_resident(
         path: &Path,
@@ -346,9 +350,23 @@ impl BlobStore {
         Ok(resident_len == expected_len && Self::hex_matches(&resident, digest_hex))
     }
 
-    fn matches_digest(bytes: &[u8], reference: &BlobRef) -> bool {
-        bytes.len() == usize::try_from(reference.length_bytes).unwrap_or(usize::MAX)
-            && Self::hex_matches(bytes, &reference.digest_hex)
+    fn matches_file(file: &mut fs::File, reference: &BlobRef) -> Result<bool, StoreError> {
+        if file.metadata()?.len() != reference.length_bytes {
+            return Ok(false);
+        }
+        let mut hasher = Sha256::new();
+        let mut chunk = vec![0_u8; INGEST_CHUNK_BYTES];
+        loop {
+            let filled = file.read(&mut chunk)?;
+            if filled == 0 {
+                break;
+            }
+            let Some(filled_bytes) = chunk.get(..filled) else {
+                return Ok(false);
+            };
+            hasher.update(filled_bytes);
+        }
+        Ok(encode_digest(&hasher.finalize()) == reference.digest_hex)
     }
 
     fn hex_matches(bytes: &[u8], digest_hex: &str) -> bool {

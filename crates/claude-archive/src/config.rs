@@ -73,6 +73,14 @@ pub struct Limits {
     /// Maximum accepted archive size in bytes. Receipt refuses a stream that
     /// exceeds it mid-flight, before anything durable is written.
     pub max_archive_bytes: u64,
+    /// Maximum ZIP entries accepted from one raw archive.
+    pub max_archive_entries: u32,
+    /// Maximum decompressed bytes accepted from one ZIP entry.
+    pub max_entry_bytes: u64,
+    /// Maximum decompressed bytes accepted across one ZIP archive.
+    pub max_total_extracted_bytes: u64,
+    /// Maximum declared ZIP compression ratio accepted from one entry.
+    pub max_compression_ratio: u32,
 }
 
 /// One configuration violation. The offending key and the rule it broke, and
@@ -176,6 +184,7 @@ impl Config {
                 rule: "is required: the archive database has no default",
             });
         }
+        validate_inspection_limits(&config.limits, &mut violations);
 
         if violations.is_empty() {
             Ok(config)
@@ -240,7 +249,32 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
             Ok(parsed) => config.limits.max_archive_bytes = parsed,
             Err(rule) => violations.push(refused(rule)),
         },
+        "RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRIES" => match parse_positive::<u32>(value) {
+            Ok(parsed) => config.limits.max_archive_entries = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
+        "RATATOSKR__LIMITS__MAX_ENTRY_BYTES" => match parse_positive::<u64>(value) {
+            Ok(parsed) => config.limits.max_entry_bytes = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
+        "RATATOSKR__LIMITS__MAX_TOTAL_EXTRACTED_BYTES" => match parse_positive::<u64>(value) {
+            Ok(parsed) => config.limits.max_total_extracted_bytes = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
+        "RATATOSKR__LIMITS__MAX_COMPRESSION_RATIO" => match parse_positive::<u32>(value) {
+            Ok(parsed) => config.limits.max_compression_ratio = parsed,
+            Err(rule) => violations.push(refused(rule)),
+        },
         _ => violations.push(refused("is not recognized")),
+    }
+}
+
+fn validate_inspection_limits(limits: &Limits, violations: &mut Vec<Violation>) {
+    if limits.max_total_extracted_bytes < limits.max_entry_bytes {
+        violations.push(Violation {
+            key: "RATATOSKR__LIMITS__MAX_TOTAL_EXTRACTED_BYTES".to_owned(),
+            rule: "must be at least RATATOSKR__LIMITS__MAX_ENTRY_BYTES",
+        });
     }
 }
 
@@ -275,6 +309,10 @@ impl Default for Config {
                 database_acquire_timeout_ms: 5_000,
                 shutdown_timeout_ms: 10_000,
                 max_archive_bytes: 10 * 1024 * 1024 * 1024,
+                max_archive_entries: 50_000,
+                max_entry_bytes: 1024 * 1024 * 1024,
+                max_total_extracted_bytes: 10 * 1024 * 1024 * 1024,
+                max_compression_ratio: 100,
             },
         }
     }

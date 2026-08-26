@@ -2,7 +2,7 @@
 
 `ratatoskr-claude` is the Claude archive bounded context for Ratatoskr. It preserves official Claude exports and supported Compliance data as immutable evidence, normalizes projects, project knowledge, conversation graphs, files, and Artifacts, and publishes searchable local projections without relying on a live Claude browser session.
 
-> **Status:** implementation plan items 1 and 2 are complete: a Rust service runs locally against PostgreSQL with typed strict configuration, structured telemetry, operator health routes (`/health/live`, `/health/ready`, `/metrics`, `/version`), typed errors, a content-addressed BlobStore adapter with capped streaming ingest, and the first-version `claude_archive` schema applied at startup. Authenticated tenant-scoped archive receipt exists: claims are verified before storage, archives are hashed and counted while streaming under a configured byte cap, raw bytes land write-once behind fleet-shaped `BlobRef`s, re-delivered digests report an explicit duplicate outcome, and every accepted receipt starts a durable, crash-resumable import run. Safe container inspection, schema detection, parsers, Compliance adapters, completeness, events, and portable exports described below are planned and are not implemented yet.
+> **Status:** implementation plan items 1, 2, and 3 are complete: a Rust service runs locally against PostgreSQL with typed strict configuration, structured telemetry, operator health routes (`/health/live`, `/health/ready`, `/metrics`, `/version`), typed errors, a content-addressed BlobStore adapter with capped streaming ingest, and the first-version `claude_archive` schema applied at startup. Authenticated tenant-scoped archive receipt exists: claims are verified before storage, archives are hashed and counted while streaming under a configured byte cap, raw bytes land write-once behind fleet-shaped `BlobRef`s, re-delivered digests report an explicit duplicate outcome, and every accepted receipt starts a durable, crash-resumable import run. Plan item 3 adds bounded, non-executing ZIP inspection, bounded direct extraction to content-addressed BlobRefs with raw-digest provenance, active-media quarantine, and a versioned exact-match parser-declaration registry. Claude schema detection and normalized projection parsers remain planned; the registry does not claim a real Claude projection parser. Compliance adapters, completeness, events, and portable exports described below are also planned.
 
 > [!IMPORTANT]
 > **Ratatoskr is in development.** No database holds data that has to survive a schema change.
@@ -213,7 +213,7 @@ pub enum ContentPart {
 3. Store the original archive immutably
 4. Enforce path, count, size, and compression limits
 5. Detect Claude export schema
-6. Extract in an isolated temporary directory
+6. Stream accepted entries directly into quarantined or candidate BlobRefs under cumulative limits
 7. Preserve manifests and raw records
 8. Parse through staging tables
 9. Validate project, conversation, file, and Artifact relationships
