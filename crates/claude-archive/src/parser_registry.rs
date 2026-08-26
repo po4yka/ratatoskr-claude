@@ -39,6 +39,10 @@ pub enum ParserCapability {
     ArchiveStructure,
     /// Produces project records.
     Projects,
+    /// Produces project instruction records.
+    ProjectInstructions,
+    /// Produces Project Knowledge file references.
+    ProjectKnowledgeFiles,
     /// Produces conversation records.
     Conversations,
     /// Produces message records.

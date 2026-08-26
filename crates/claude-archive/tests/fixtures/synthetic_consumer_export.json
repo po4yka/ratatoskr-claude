@@ -5,11 +5,33 @@
       "id": "project-garden",
       "name": "Garden plans",
       "description": "Seasonal notes",
-      "instructions": "Use metric units."
+      "instructions": "Use metric units.",
+      "knowledge_files": [
+        {
+          "id": "knowledge-garden-plan",
+          "filename": "garden-plan.txt",
+          "media_type": "text/plain",
+          "sha256": "fe75f1cc18ee987f97d34faaded87de72b2ea0c96bca98e0b6c183b30f9c49fe",
+          "bytes": [103, 97, 114, 100, 101, 110, 32, 112, 108, 97, 110]
+        },
+        {
+          "id": "knowledge-reference-only",
+          "filename": "seasonal-source.pdf",
+          "media_type": "application/pdf"
+        },
+        {
+          "id": "knowledge-mismatched",
+          "filename": "mismatched-plan.txt",
+          "media_type": "text/plain",
+          "sha256": "fe75f1cc18ee987f97d34faaded87de72b2ea0c96bca98e0b6c183b30f9c49fe",
+          "bytes": [116, 97, 109, 112, 101, 114, 101, 100, 32, 112, 108, 97, 110]
+        }
+      ]
     },
     {
       "id": "project-recipes",
-      "name": "Recipes"
+      "name": "Recipes",
+      "knowledge_files": []
     }
   ],
   "conversations": [

@@ -9,7 +9,6 @@
       "external_id": "project-garden",
       "name": "Garden plans",
       "description": "Seasonal notes",
-      "instructions": "Use metric units.",
       "parser": {
         "schema_identifier": "claude-export-2026-08-synthetic",
         "parser_identifier": "claude-synthetic-consumer-export",
@@ -21,7 +20,90 @@
       "external_id": "project-recipes",
       "name": "Recipes",
       "description": null,
-      "instructions": null,
+      "parser": {
+        "schema_identifier": "claude-export-2026-08-synthetic",
+        "parser_identifier": "claude-synthetic-consumer-export",
+        "parser_version": "2026-08-26"
+      },
+      "unknown_fields": []
+    }
+  ],
+  "project_instructions": [
+    {
+      "project_external_id": "project-garden",
+      "text": "Use metric units.",
+      "parser": {
+        "schema_identifier": "claude-export-2026-08-synthetic",
+        "parser_identifier": "claude-synthetic-consumer-export",
+        "parser_version": "2026-08-26"
+      }
+    }
+  ],
+  "project_knowledge_files": [
+    {
+      "external_id": "knowledge-garden-plan",
+      "project_external_id": "project-garden",
+      "filename": "garden-plan.txt",
+      "media_type": "text/plain",
+      "declared_sha256": "fe75f1cc18ee987f97d34faaded87de72b2ea0c96bca98e0b6c183b30f9c49fe",
+      "bytes": [
+        103,
+        97,
+        114,
+        100,
+        101,
+        110,
+        32,
+        112,
+        108,
+        97,
+        110
+      ],
+      "location": "/projects/0/knowledge_files/0",
+      "parser": {
+        "schema_identifier": "claude-export-2026-08-synthetic",
+        "parser_identifier": "claude-synthetic-consumer-export",
+        "parser_version": "2026-08-26"
+      },
+      "unknown_fields": []
+    },
+    {
+      "external_id": "knowledge-reference-only",
+      "project_external_id": "project-garden",
+      "filename": "seasonal-source.pdf",
+      "media_type": "application/pdf",
+      "declared_sha256": null,
+      "bytes": null,
+      "location": "/projects/0/knowledge_files/1",
+      "parser": {
+        "schema_identifier": "claude-export-2026-08-synthetic",
+        "parser_identifier": "claude-synthetic-consumer-export",
+        "parser_version": "2026-08-26"
+      },
+      "unknown_fields": []
+    },
+    {
+      "external_id": "knowledge-mismatched",
+      "project_external_id": "project-garden",
+      "filename": "mismatched-plan.txt",
+      "media_type": "text/plain",
+      "declared_sha256": "fe75f1cc18ee987f97d34faaded87de72b2ea0c96bca98e0b6c183b30f9c49fe",
+      "bytes": [
+        116,
+        97,
+        109,
+        112,
+        101,
+        114,
+        101,
+        100,
+        32,
+        112,
+        108,
+        97,
+        110
+      ],
+      "location": "/projects/0/knowledge_files/2",
       "parser": {
         "schema_identifier": "claude-export-2026-08-synthetic",
         "parser_identifier": "claude-synthetic-consumer-export",

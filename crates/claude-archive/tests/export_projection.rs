@@ -24,10 +24,6 @@ fn maps_all_supported_records_and_relationships() {
         parsed.projects[0].description.as_deref(),
         Some("Seasonal notes")
     );
-    assert_eq!(
-        parsed.projects[0].instructions.as_deref(),
-        Some("Use metric units.")
-    );
     assert_eq!(parsed.projects[1].external_id, "project-recipes");
     assert_eq!(parsed.conversations.len(), 1);
 
@@ -56,6 +52,40 @@ fn maps_all_supported_records_and_relationships() {
 }
 
 #[test]
+fn preserves_first_class_project_instructions_and_knowledge_references() {
+    let parsed = ConsumerExportParser::parse(SYNTHETIC_EXPORT.as_bytes())
+        .expect("the documented synthetic fixture parses");
+
+    assert_eq!(parsed.project_instructions.len(), 1);
+    assert_eq!(
+        parsed.project_instructions[0].project_external_id,
+        "project-garden"
+    );
+    assert_eq!(parsed.project_instructions[0].text, "Use metric units.");
+    assert_stamp(&parsed.project_instructions[0].parser);
+
+    assert_eq!(parsed.project_knowledge_files.len(), 3);
+    assert_eq!(
+        parsed.project_knowledge_files[0].external_id,
+        "knowledge-garden-plan"
+    );
+    assert_eq!(
+        parsed.project_knowledge_files[0].project_external_id,
+        "project-garden"
+    );
+    assert_eq!(
+        parsed.project_knowledge_files[1].filename,
+        "seasonal-source.pdf"
+    );
+    assert_eq!(parsed.project_knowledge_files[1].bytes, None);
+    assert_eq!(
+        parsed.project_knowledge_files[2].declared_sha256.as_deref(),
+        Some("fe75f1cc18ee987f97d34faaded87de72b2ea0c96bca98e0b6c183b30f9c49fe")
+    );
+    assert_stamp(&parsed.project_knowledge_files[2].parser);
+}
+
+#[test]
 fn stamps_every_projection_record_with_parser_provenance() {
     let parsed = ConsumerExportParser::parse(SYNTHETIC_EXPORT.as_bytes())
         .expect("the documented synthetic fixture parses");
@@ -63,6 +93,12 @@ fn stamps_every_projection_record_with_parser_provenance() {
     assert_stamp(&parsed.parser);
     for project in &parsed.projects {
         assert_stamp(&project.parser);
+    }
+    for instruction in &parsed.project_instructions {
+        assert_stamp(&instruction.parser);
+    }
+    for knowledge_file in &parsed.project_knowledge_files {
+        assert_stamp(&knowledge_file.parser);
     }
     for conversation in &parsed.conversations {
         assert_stamp(&conversation.parser);
