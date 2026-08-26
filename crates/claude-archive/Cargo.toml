@@ -12,6 +12,7 @@ metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 secrecy.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
@@ -28,7 +29,6 @@ test-support = []
 # Self-dependency so integration tests see the test-support module while the
 # default feature set stays clean for every other consumer.
 ratatoskr-claude-archive = { path = ".", features = ["test-support"] }
-serde_json.workspace = true
 sha2.workspace = true
 
 [lints]

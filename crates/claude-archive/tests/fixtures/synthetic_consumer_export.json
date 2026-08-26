@@ -1,0 +1,42 @@
+{
+  "schema": "claude-export-2026-08-synthetic",
+  "projects": [
+    {
+      "id": "project-garden",
+      "name": "Garden plans",
+      "description": "Seasonal notes",
+      "instructions": "Use metric units."
+    },
+    {
+      "id": "project-recipes",
+      "name": "Recipes"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "conversation-planting",
+      "project_id": "project-garden",
+      "title": "Planting calendar",
+      "created_at": "2026-08-01T08:00:00Z",
+      "messages": [
+        {
+          "id": "message-user-1",
+          "role": "user",
+          "content": [
+            { "type": "text", "text": "When should basil be planted?" },
+            { "type": "markdown", "markdown": "## Climate\nWarm season" }
+          ]
+        },
+        {
+          "id": "message-assistant-1",
+          "parent_id": "message-user-1",
+          "role": "assistant",
+          "model": "claude-synthetic",
+          "content": [
+            { "type": "text", "text": "After the last frost." }
+          ]
+        }
+      ]
+    }
+  ]
+}

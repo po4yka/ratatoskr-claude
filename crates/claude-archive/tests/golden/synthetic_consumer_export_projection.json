@@ -1,0 +1,110 @@
+{
+  "parser": {
+    "schema_identifier": "claude-export-2026-08-synthetic",
+    "parser_identifier": "claude-synthetic-consumer-export",
+    "parser_version": "2026-08-26"
+  },
+  "projects": [
+    {
+      "external_id": "project-garden",
+      "name": "Garden plans",
+      "description": "Seasonal notes",
+      "instructions": "Use metric units.",
+      "parser": {
+        "schema_identifier": "claude-export-2026-08-synthetic",
+        "parser_identifier": "claude-synthetic-consumer-export",
+        "parser_version": "2026-08-26"
+      },
+      "unknown_fields": []
+    },
+    {
+      "external_id": "project-recipes",
+      "name": "Recipes",
+      "description": null,
+      "instructions": null,
+      "parser": {
+        "schema_identifier": "claude-export-2026-08-synthetic",
+        "parser_identifier": "claude-synthetic-consumer-export",
+        "parser_version": "2026-08-26"
+      },
+      "unknown_fields": []
+    }
+  ],
+  "conversations": [
+    {
+      "external_id": "conversation-planting",
+      "project_external_id": "project-garden",
+      "title": "Planting calendar",
+      "created_at": "2026-08-01T08:00:00Z",
+      "messages": [
+        {
+          "external_id": "message-user-1",
+          "parent_external_id": null,
+          "role": "user",
+          "model": null,
+          "created_at": null,
+          "content": [
+            {
+              "kind": "text",
+              "text": "When should basil be planted?",
+              "parser": {
+                "schema_identifier": "claude-export-2026-08-synthetic",
+                "parser_identifier": "claude-synthetic-consumer-export",
+                "parser_version": "2026-08-26"
+              },
+              "unknown_fields": []
+            },
+            {
+              "kind": "markdown",
+              "markdown": "## Climate\nWarm season",
+              "parser": {
+                "schema_identifier": "claude-export-2026-08-synthetic",
+                "parser_identifier": "claude-synthetic-consumer-export",
+                "parser_version": "2026-08-26"
+              },
+              "unknown_fields": []
+            }
+          ],
+          "parser": {
+            "schema_identifier": "claude-export-2026-08-synthetic",
+            "parser_identifier": "claude-synthetic-consumer-export",
+            "parser_version": "2026-08-26"
+          },
+          "unknown_fields": []
+        },
+        {
+          "external_id": "message-assistant-1",
+          "parent_external_id": "message-user-1",
+          "role": "assistant",
+          "model": "claude-synthetic",
+          "created_at": null,
+          "content": [
+            {
+              "kind": "text",
+              "text": "After the last frost.",
+              "parser": {
+                "schema_identifier": "claude-export-2026-08-synthetic",
+                "parser_identifier": "claude-synthetic-consumer-export",
+                "parser_version": "2026-08-26"
+              },
+              "unknown_fields": []
+            }
+          ],
+          "parser": {
+            "schema_identifier": "claude-export-2026-08-synthetic",
+            "parser_identifier": "claude-synthetic-consumer-export",
+            "parser_version": "2026-08-26"
+          },
+          "unknown_fields": []
+        }
+      ],
+      "parser": {
+        "schema_identifier": "claude-export-2026-08-synthetic",
+        "parser_identifier": "claude-synthetic-consumer-export",
+        "parser_version": "2026-08-26"
+      },
+      "unknown_fields": []
+    }
+  ],
+  "unknown_fields": []
+}

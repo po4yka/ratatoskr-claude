@@ -1,0 +1,32 @@
+{
+  "schema": "claude-export-2026-08-synthetic",
+  "projects": [
+    {
+      "id": "project-garden",
+      "name": "Garden plans",
+      "future_project": { "region": "west" }
+    }
+  ],
+  "conversations": [
+    {
+      "id": "conversation-planting",
+      "title": "Planting calendar",
+      "future_conversation": 42,
+      "messages": [
+        {
+          "id": "message-user-1",
+          "role": "user",
+          "future_message": "retain me",
+          "content": [
+            {
+              "type": "text",
+              "text": "When should basil be planted?",
+              "future_part": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "future_root": { "edition": 2 }
+}

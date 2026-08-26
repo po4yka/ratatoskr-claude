@@ -12,6 +12,7 @@ pub mod archive_inspection;
 pub mod blob_store;
 pub mod config;
 pub mod database;
+pub mod export_projection;
 pub mod import_state;
 pub mod parser_registry;
 pub mod receipt;
@@ -25,6 +26,10 @@ pub use archive_inspection::{
 pub use blob_store::{BlobRef, BlobStore, DigestAlgorithm, MediaType, StoreError};
 pub use config::{AdminConfig, Config, ConfigError, Limits, StorageConfig, TelemetryConfig};
 pub use database::{Database, PersistenceError};
+pub use export_projection::{
+    ConsumerExportParser, ContentPart, Conversation, ExportParseError, Message, ParsedExport,
+    ParserStamp, Project, UnknownField,
+};
 pub use import_state::{ImportError, ImportRunStore, ImportState, TransitionOutcome};
 pub use parser_registry::{
     DetectedSchema, ParserCapability, ParserDescriptor, ParserRegistry, ParserRegistryError,

@@ -1,8 +1,8 @@
 # Developing Ratatoskr Claude Archive
 
-Status: Accepted (implementation plan items 1, 2, and 3 complete). Last reviewed: 2026-08-26.
+Status: Accepted (implementation plan items 1–4 complete). Last reviewed: 2026-08-26.
 
-The service scaffold exists: typed strict configuration, structured telemetry, operator health routes, typed errors, a content-addressed BlobStore adapter with capped streaming ingest, and the first-version `claude_archive` schema applied at startup. Authenticated tenant-scoped archive receipt exists: claims verify against known accounts/organizations before storage, archives hash and count while streaming under `RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES`, raw bytes land write-once, re-delivered digests report an explicit duplicate outcome, and each accepted receipt starts a durable crash-resumable import run driven by guarded state transitions. Plan item 3 adds bounded, non-executing ZIP structure inspection; direct bounded extraction to BlobStore with raw-digest provenance; conservative active-media quarantine; and an exact-match versioned parser-declaration registry. Claude schema detection and every normalized projection parser remain planned; no declaration in the registry claims a real Claude projection yet. Compliance adapter, Artifact handling, and portable exporter are not implemented yet.
+The service scaffold exists: typed strict configuration, structured telemetry, operator health routes, typed errors, a content-addressed BlobStore adapter with capped streaming ingest, and the first-version `claude_archive` schema applied at startup. Authenticated tenant-scoped archive receipt exists: claims verify against known accounts/organizations before storage, archives hash and count while streaming under `RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES`, raw bytes land write-once, re-delivered digests report an explicit duplicate outcome, and each accepted receipt starts a durable crash-resumable import run driven by guarded state transitions. Plan item 3 adds bounded, non-executing ZIP structure inspection; direct bounded extraction to BlobStore with raw-digest provenance; conservative active-media quarantine; and an exact-match versioned parser-declaration registry. Plan item 4 adds the first exact consumer-export parser for the documented synthetic schema, with projects, conversations, messages, ordered text/Markdown parts, parser stamps, and inert unknown evidence covered by committed golden tests. Real-export validation remains a required protected-fixture follow-up; schema detection beyond the declared synthetic identifier, Compliance adapter, Artifact handling, and portable exporter are not implemented yet.
 
 ## Toolchain
 
@@ -69,6 +69,14 @@ Tests use disposable databases created from `schema.sql`; override their locatio
 5. Test archive limits, graph/version integrity, missing assets, interruption, privacy deletion, Compliance cursors, and portable export.
 
 CI uses synthetic fixtures and never Claude session cookies or personal exports.
+
+## Consumer-export parser validation boundary
+
+The first consumer-export projection parser is verified only against committed,
+synthetic fixtures for `claude-export-2026-08-synthetic`. Validation against a
+minimized and owner-provided real Claude export is a required follow-up blocker:
+until that protected fixture is supplied and exercised locally, the parser does
+not claim compatibility with a current provider export.
 
 ## What a clone needs before you plan a change
 

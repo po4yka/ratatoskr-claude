@@ -1,0 +1,23 @@
+{
+  "schema": "claude-export-2026-08-synthetic",
+  "projects": [],
+  "conversations": [
+    {
+      "id": "conversation-future-content",
+      "title": "Future content",
+      "messages": [
+        {
+          "id": "message-future-content",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "provider_future_content",
+              "reference": "asset-42",
+              "provider_flag": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
