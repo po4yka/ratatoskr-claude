@@ -14,7 +14,10 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ratatoskr_claude_archive_service::RuntimeState;
+use ratatoskr_claude_archive::BlobStore;
+use ratatoskr_claude_archive::blob_store::scratch::{remove, temp_root};
+use ratatoskr_claude_archive::test_support::TestDatabase;
+use ratatoskr_claude_archive_service::{PlatformReceiptState, RuntimeState};
 use serde_json::Value;
 use tower::ServiceExt as _;
 
@@ -41,6 +44,39 @@ async fn get(router: axum::Router, path: &str) -> (StatusCode, Value, Option<Str
         .to_bytes();
     let body: Value = serde_json::from_slice(&bytes).expect("admin bodies are JSON");
     (status, body, cache_control)
+}
+
+async fn post_receipt(router: axum::Router) -> StatusCode {
+    router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/ai-archives/receipt")
+                .header("content-type", "application/zip")
+                .header(
+                    "x-ratatoskr-user-id",
+                    "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb56",
+                )
+                .header(
+                    "x-ratatoskr-device-id",
+                    "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb57",
+                )
+                .header("x-correlation-id", "archive-receipt-test")
+                .header(
+                    "x-ratatoskr-operation-id",
+                    "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb58",
+                )
+                .header(
+                    "x-ratatoskr-archive-sha256",
+                    "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+                )
+                .header("x-ratatoskr-archive-byte-size", "1")
+                .body(Body::from("x"))
+                .expect("the receipt request is well-formed"),
+        )
+        .await
+        .expect("the in-memory service answers")
+        .status()
 }
 
 fn check<'a>(body: &'a Value, name: &str) -> &'a Value {
@@ -153,4 +189,48 @@ fn responses_carry_no_store() {
         .block_on(async { get(router, "/health/live").await });
 
     assert_eq!(cache_control.as_deref(), Some("no-store"));
+}
+
+#[tokio::test]
+async fn platform_archive_receipt_route_is_available() {
+    let database = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let platform_user = uuid::Uuid::parse_str("018f5b4a-7c6f-7ab1-95d6-86ebc16bbb56")
+        .expect("the fixture Platform user is a UUID");
+    let archive_account = uuid::Uuid::now_v7();
+    sqlx::query(
+        "insert into claude_archive.accounts (account_id, external_account_id) values ($1, $2)",
+    )
+    .bind(archive_account)
+    .bind(format!("account-{archive_account}"))
+    .execute(database.database.pool())
+    .await
+    .expect("the mapped archive account inserts");
+    let root = temp_root("platform-receipt-route");
+    let store = BlobStore::open(&root).expect("the temporary blob store opens");
+    let runtime = Arc::new(RuntimeState::new());
+    let router = ratatoskr_claude_archive_service::service_router(
+        runtime,
+        || "stub".to_owned(),
+        PlatformReceiptState::new(
+            database.database.clone(),
+            store,
+            &[(platform_user, archive_account)],
+            1024,
+        ),
+    );
+
+    let status = post_receipt(router).await;
+
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "the Platform receipt endpoint accepts its trusted envelope"
+    );
+    remove(&root);
+    database
+        .cleanup()
+        .await
+        .expect("the disposable database cleans up");
 }

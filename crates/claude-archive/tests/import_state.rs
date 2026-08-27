@@ -51,10 +51,11 @@ async fn seeded_export(pool: &sqlx::PgPool) -> Uuid {
     let export_id = Uuid::now_v7();
     sqlx::query(
         "insert into claude_archive.exports
-             (export_id, account_ref, acquisition, archive_hash, blob_ref, byte_size, received_at)
-         values ($1, $2, 'consumer_export', $3, 'sha256/aa/bb', 10, now())",
+             (export_id, ai_archive_id, account_ref, acquisition, archive_hash, blob_ref, byte_size, received_at)
+         values ($1, $2, $3, 'consumer_export', $4, 'sha256/aa/bb', 10, now())",
     )
     .bind(export_id)
+    .bind(Uuid::now_v7())
     .bind(account_id)
     .bind(account_id.as_bytes().to_vec())
     .execute(pool)

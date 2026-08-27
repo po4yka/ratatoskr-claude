@@ -8,8 +8,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-nats.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
+ratatoskr-ai-archive-contracts.workspace = true
+ratatoskr-identifiers.workspace = true
+ratatoskr-operation-contracts.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true

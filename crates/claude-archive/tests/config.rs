@@ -214,3 +214,18 @@ fn archive_inspection_limits_reject_zero_or_inconsistent_values() {
             && violation.rule.contains("positive")
     }));
 }
+
+#[test]
+fn event_bus_url_loads_without_rendering_its_value() {
+    let endpoint = "nats://operator-secret@127.0.0.1:4222";
+    let mut environment = minimal_environment();
+    environment.push(("RATATOSKR__RECEIPT__EVENT_BUS_URL", endpoint));
+
+    let config = Config::from_environment(environment)
+        .expect("a valid event-bus endpoint is accepted by strict configuration");
+
+    assert!(
+        !format!("{config:?}").contains(endpoint),
+        "debug output redacts the event-bus endpoint"
+    );
+}

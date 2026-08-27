@@ -22,13 +22,16 @@ ratatoskr-claude-archive.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tower.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 # Self-package tests reach the disposable-database and scratch helpers.
 ratatoskr-claude-archive = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
+sqlx.workspace = true
 
 [lints]
 workspace = true

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use secrecy::SecretString;
 use serde::Serialize;
+use uuid::Uuid;
 
 const ENV_PREFIX: &str = "RATATOSKR__";
 
@@ -21,6 +22,28 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     /// Resource and shutdown limits.
     pub limits: Limits,
+    /// Trusted Platform receipt and terminal-report configuration.
+    pub receipt: ReceiptConfig,
+}
+
+/// Private receipt integration configuration.
+#[derive(Clone, Serialize)]
+pub struct ReceiptConfig {
+    /// Platform user identifiers mapped to known Claude archive account IDs.
+    pub platform_accounts: Vec<(Uuid, Uuid)>,
+    /// NATS `JetStream` endpoint for durable terminal operation reports.
+    #[serde(skip_serializing)]
+    pub event_bus_url: Option<SecretString>,
+}
+
+impl std::fmt::Debug for ReceiptConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReceiptConfig")
+            .field("platform_accounts", &self.platform_accounts.len())
+            .field("event_bus_url", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Loopback-only operator listener configuration.
@@ -233,6 +256,19 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
                 value.clone_into(&mut config.telemetry.log_filter);
             }
         }
+        "RATATOSKR__RECEIPT__EVENT_BUS_URL" => {
+            if value.starts_with("nats://") || value.starts_with("tls://") {
+                config.receipt.event_bus_url = Some(SecretString::from(value.to_owned()));
+            } else {
+                violations.push(refused("must be a nats:// or tls:// endpoint"));
+            }
+        }
+        "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS" => match parse_platform_accounts(value) {
+            Some(accounts) => config.receipt.platform_accounts = accounts,
+            None => violations.push(refused(
+                "must map Platform and archive UUIDs as user=account pairs",
+            )),
+        },
         "RATATOSKR__LIMITS__DATABASE_CONNECTIONS" => match parse_positive::<u32>(value) {
             Ok(parsed) => config.limits.database_connections = parsed,
             Err(rule) => violations.push(refused(rule)),
@@ -267,6 +303,19 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
         },
         _ => violations.push(refused("is not recognized")),
     }
+}
+
+fn parse_platform_accounts(value: &str) -> Option<Vec<(Uuid, Uuid)>> {
+    if value.is_empty() {
+        return Some(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|pair| {
+            let (user, account) = pair.split_once('=')?;
+            Some((user.parse().ok()?, account.parse().ok()?))
+        })
+        .collect()
 }
 
 fn validate_inspection_limits(limits: &Limits, violations: &mut Vec<Violation>) {
@@ -313,6 +362,10 @@ impl Default for Config {
                 max_entry_bytes: 1024 * 1024 * 1024,
                 max_total_extracted_bytes: 10 * 1024 * 1024 * 1024,
                 max_compression_ratio: 100,
+            },
+            receipt: ReceiptConfig {
+                platform_accounts: Vec::new(),
+                event_bus_url: None,
             },
         }
     }

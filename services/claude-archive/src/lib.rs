@@ -8,17 +8,26 @@
 //! Every admin response carries `Cache-Control: no-store`: a cached "ready"
 //! is a routing decision made from stale data.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use axum::Json;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
+use http_body_util::BodyExt as _;
+use ratatoskr_claude_archive::{
+    ArchiveIdentity, BlobStore, Database, MediaType, PlatformOperation, StoreError, TenantClaim,
+};
 use serde::Serialize;
+use tokio::io::AsyncWriteExt as _;
+use tokio_util::io::SyncIoBridge;
+use uuid::Uuid;
 
 /// No probe of this dependency has answered yet.
 const COMPONENT_ABSENT: u8 = 0;
@@ -211,6 +220,35 @@ pub enum CheckReason {
 
 /// The Prometheus text exposition format the `metrics` crate renders.
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
+/// The HTTP stream cannot outrun the archive reader by more than this bound.
+const RECEIPT_PIPE_BYTES: usize = 64 * 1024;
+
+/// Verified local dependencies used only by the Platform receipt route.
+#[derive(Debug, Clone)]
+pub struct PlatformReceiptState {
+    database: Database,
+    blob_store: BlobStore,
+    platform_accounts: HashMap<Uuid, Uuid>,
+    max_archive_bytes: u64,
+}
+
+impl PlatformReceiptState {
+    /// Creates the state used by a loopback Platform receipt listener.
+    #[must_use]
+    pub fn new(
+        database: Database,
+        blob_store: BlobStore,
+        platform_accounts: &[(Uuid, Uuid)],
+        max_archive_bytes: u64,
+    ) -> Self {
+        Self {
+            database,
+            blob_store,
+            platform_accounts: platform_accounts.iter().copied().collect(),
+            max_archive_bytes,
+        }
+    }
+}
 
 struct AdminState {
     runtime: Arc<RuntimeState>,
@@ -233,6 +271,20 @@ pub fn admin_router(
         .route("/version", get(version))
         .with_state(state)
         .layer(middleware::from_fn(no_store))
+}
+
+/// Combines operator probes with the private Platform receipt listener.
+pub fn service_router(
+    runtime: Arc<RuntimeState>,
+    render_metrics: impl Fn() -> String + Send + Sync + 'static,
+    receipt: PlatformReceiptState,
+) -> Router {
+    admin_router(runtime, render_metrics).merge(
+        Router::new()
+            .route("/v1/ai-archives/receipt", post(platform_receipt))
+            .with_state(Arc::new(receipt))
+            .layer(middleware::from_fn(no_store)),
+    )
 }
 
 /// *This process's async runtime is scheduling tasks and the server answers.*
@@ -285,6 +337,123 @@ async fn version() -> Json<Version> {
         git_sha: ratatoskr_claude_archive::telemetry::GIT_SHA,
         rust_version: ratatoskr_claude_archive::telemetry::RUST_VERSION,
     })
+}
+
+/// Receives a Platform-forwarded archive through the bounded streaming bridge.
+async fn platform_receipt(
+    State(state): State<Arc<PlatformReceiptState>>,
+    headers: HeaderMap,
+    mut body: Body,
+) -> StatusCode {
+    if headers.contains_key(header::AUTHORIZATION) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let Some((claim, identity, operation)) = platform_claims(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        != Some("application/zip")
+    {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    let scope = match ratatoskr_claude_archive::receipt::authenticate_claim(&state.database, &claim)
+        .await
+    {
+        Ok(scope) => scope,
+        Err(ratatoskr_claude_archive::ReceiptError::UnknownTenant) => {
+            return StatusCode::UNAUTHORIZED;
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let Ok(media_type) = MediaType::parse("application/zip") else {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    };
+    let (reader, mut writer) = tokio::io::duplex(RECEIPT_PIPE_BYTES);
+    let blob_store = state.blob_store.clone();
+    let maximum = state.max_archive_bytes;
+    let receiver = tokio::task::spawn_blocking(move || {
+        blob_store.store_stream_with_identity(
+            media_type,
+            SyncIoBridge::new(reader),
+            maximum,
+            &identity.sha256,
+            identity.byte_size,
+        )
+    });
+
+    while let Some(frame) = body.frame().await {
+        let Ok(frame) = frame else {
+            receiver.abort();
+            return StatusCode::BAD_REQUEST;
+        };
+        if let Ok(bytes) = frame.into_data()
+            && writer.write_all(&bytes).await.is_err()
+        {
+            receiver.abort();
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+    if writer.shutdown().await.is_err() {
+        receiver.abort();
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    match receiver.await {
+        Ok(Ok(blob_ref)) => {
+            match ratatoskr_claude_archive::receipt::record_verified_platform_archive(
+                &state.database,
+                scope,
+                blob_ref,
+                operation,
+            )
+            .await
+            {
+                Ok(_) => StatusCode::ACCEPTED,
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        }
+        Ok(Err(StoreError::DeclaredIdentityMismatch)) => StatusCode::BAD_REQUEST,
+        Ok(Err(_)) | Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn platform_claims(
+    state: &PlatformReceiptState,
+    headers: &HeaderMap,
+) -> Option<(TenantClaim, ArchiveIdentity, PlatformOperation)> {
+    let header = |name: &'static str| headers.get(name)?.to_str().ok();
+    let user_id = header("x-ratatoskr-user-id")?.parse::<Uuid>().ok()?;
+    let _device_id = header("x-ratatoskr-device-id")?.parse::<Uuid>().ok()?;
+    let correlation = header("x-correlation-id")?;
+    let operation_id = header("x-ratatoskr-operation-id")?.parse::<Uuid>().ok()?;
+    let sha256 = header("x-ratatoskr-archive-sha256")?;
+    let byte_size = header("x-ratatoskr-archive-byte-size")?
+        .parse::<u64>()
+        .ok()?;
+    if correlation.is_empty()
+        || correlation.len() > 200
+        || byte_size == 0
+        || sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let account = *state.platform_accounts.get(&user_id)?;
+    Some((
+        TenantClaim {
+            account: Some(account),
+            organization: None,
+        },
+        ArchiveIdentity {
+            sha256: sha256.to_owned(),
+            byte_size,
+        },
+        PlatformOperation { operation_id },
+    ))
 }
 
 /// `Cache-Control: no-store` on every admin response, including bare 404s.

@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ratatoskr_claude_archive::OperationReportOutbox;
 use ratatoskr_claude_archive::blob_store::BlobStore;
 use ratatoskr_claude_archive::telemetry::SERVICE_NAME;
 use ratatoskr_claude_archive::{Config, Database};
@@ -28,6 +29,8 @@ use secrecy::ExposeSecret as _;
 /// Long enough that the probe is not itself load; short enough that a
 /// readiness state is never more than one scrape interval stale.
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
+/// Terminal reports are retried gently; each pass has its own finite broker cap.
+const OPERATION_REPORT_INTERVAL: Duration = Duration::from_secs(2);
 
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("check-config") {
@@ -134,7 +137,13 @@ async fn tokio_main() -> Result<(), ExitCode> {
 
     // The first probes happen before readiness flips, so the process never
     // reports itself ready over unverified dependencies.
-    let prober = spawn_probers(database.clone(), blob_store, Arc::clone(&runtime));
+    let prober = spawn_probers(database.clone(), blob_store.clone(), Arc::clone(&runtime));
+    let operation_reporter = config.receipt.event_bus_url.as_ref().map(|endpoint| {
+        spawn_operation_reporter(
+            OperationReportOutbox::new(database.pool().clone()),
+            endpoint.expose_secret().to_owned(),
+        )
+    });
     runtime.mark_startup_complete();
     tracing::info!(admin = %config.admin.listen_address, "startup complete");
 
@@ -143,12 +152,18 @@ async fn tokio_main() -> Result<(), ExitCode> {
         listener,
         Arc::clone(&runtime),
         database,
+        blob_store,
+        config.receipt.platform_accounts,
+        config.limits.max_archive_bytes,
         move || metrics_handle.render(),
         Duration::from_millis(config.limits.shutdown_timeout_ms),
     )
     .await;
 
     prober.abort();
+    if let Some(reporter) = operation_reporter {
+        reporter.abort();
+    }
 
     match serve_result {
         Ok(()) => {
@@ -162,17 +177,53 @@ async fn tokio_main() -> Result<(), ExitCode> {
     }
 }
 
+/// Delivers a bounded batch of durable terminal reports on each interval.
+///
+/// A failed pass is intentionally quiet about broker details: the outbox row
+/// remains pending and the next pass retries it with the same message ID.
+fn spawn_operation_reporter(
+    outbox: OperationReportOutbox,
+    endpoint: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(OPERATION_REPORT_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if outbox.publish_pending_once(&endpoint).await.is_err() {
+                tracing::warn!("terminal operation report publication deferred");
+            }
+        }
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "startup owns each independently drained runtime dependency"
+)]
 async fn serve_admin(
     listener: tokio::net::TcpListener,
     runtime: Arc<RuntimeState>,
     database: Database,
+    blob_store: BlobStore,
+    platform_accounts: Vec<(uuid::Uuid, uuid::Uuid)>,
+    max_archive_bytes: u64,
     render_metrics: impl Fn() -> String + Send + Sync + 'static,
     shutdown_timeout: Duration,
 ) -> Result<(), String> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let server = axum::serve(
         listener,
-        ratatoskr_claude_archive_service::admin_router(runtime.clone(), render_metrics),
+        ratatoskr_claude_archive_service::service_router(
+            runtime.clone(),
+            render_metrics,
+            ratatoskr_claude_archive_service::PlatformReceiptState::new(
+                database.clone(),
+                blob_store,
+                &platform_accounts,
+                max_archive_bytes,
+            ),
+        ),
     )
     .with_graceful_shutdown(async move {
         let _ignored = shutdown_rx.await;

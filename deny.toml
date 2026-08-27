@@ -41,4 +41,6 @@ deny = [
 unknown-registry = "deny"
 unknown-git      = "deny"
 required-git-spec = "rev"
-allow-git = []
+# Shared Ratatoskr contracts are reviewed as one pinned source. All entries in
+# Cargo.lock must still select an immutable revision above.
+allow-git = ["https://github.com/po4yka/ratatoskr-contracts"]

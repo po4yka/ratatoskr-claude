@@ -84,6 +84,7 @@ comment on table claude_archive.organizations is
 
 create table claude_archive.exports (
     export_id        uuid        primary key,
+    ai_archive_id    uuid        not null,
     account_ref      uuid        references claude_archive.accounts (account_id),
     organization_ref uuid        references claude_archive.organizations (organization_id),
     acquisition      text        not null,
@@ -537,7 +538,7 @@ create table claude_archive.outbox_events (
     attempt_count   integer     not null default 0,
     next_attempt_at timestamptz,
     constraint outbox_events_aggregate_type_check
-        check (aggregate_type in ('export', 'import_run', 'project', 'conversation', 'message',
+        check (aggregate_type in ('operation', 'export', 'import_run', 'project', 'conversation', 'message',
                                   'artifact', 'asset'))
 );
 
@@ -547,6 +548,10 @@ comment on table claude_archive.outbox_events is
 create index outbox_events_unpublished_idx
     on claude_archive.outbox_events (next_attempt_at)
     where published_at is null;
+
+create unique index outbox_operation_report_once
+    on claude_archive.outbox_events (event_type, aggregate_id)
+    where event_type = 'platform.operation.reported.v1';
 
 -- ---------------------------------------------------------------------------------------------
 -- inbox_events

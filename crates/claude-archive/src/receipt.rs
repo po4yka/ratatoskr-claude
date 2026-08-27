@@ -10,6 +10,14 @@
 
 use uuid::Uuid;
 
+use ratatoskr_ai_archive_contracts::{
+    AiArchiveCompleteness, AiArchiveOperationSummary, AiProvider,
+};
+use ratatoskr_identifiers::{AiArchiveId, EntityRef, Extensions, OperationId};
+use ratatoskr_operation_contracts::{
+    OperationReported, OperationResultKind, OperationResultRef, OperationStatus,
+};
+
 use crate::blob_store::{BlobRef, BlobStore, MediaType, StoreError};
 use crate::database::Database;
 use crate::import_state::ImportState;
@@ -89,6 +97,31 @@ pub enum ReceiptError {
     /// An archive-owned database operation failed.
     #[error("a receipt database operation failed")]
     Query(#[from] sqlx::Error),
+    /// Platform's declared raw archive identity differs from the stream.
+    #[error("the delivered archive differs from Platform's declared identity")]
+    DeclaredIdentityMismatch,
+    /// A typed Platform operation report could not be encoded.
+    #[error("the terminal operation report could not be encoded")]
+    ReportEncoding(#[from] serde_json::Error),
+    /// The published operation-contract vocabulary rejected a fixed value.
+    #[error("the terminal operation report could not satisfy its contract")]
+    ReportContract,
+}
+
+/// Platform's independently computed raw archive identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveIdentity {
+    /// Lowercase SHA-256 hexadecimal digest expected for the stream.
+    pub sha256: String,
+    /// Exact byte length expected for the stream.
+    pub byte_size: u64,
+}
+
+/// Platform operation waiting for the terminal result this receipt can prove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformOperation {
+    /// Platform-owned operation identity from the trusted receipt boundary.
+    pub operation_id: Uuid,
 }
 
 /// What one receipt attempt actually did.
@@ -159,7 +192,6 @@ pub async fn receive_archive(
     max_bytes: u64,
 ) -> Result<ReceiptOutcome, ReceiptError> {
     let scope = authenticate_claim(database, claim).await?;
-
     let media_type = MediaType::parse(RAW_ARCHIVE_MEDIA_TYPE)?;
     let blob_ref = store
         .store_stream(media_type, &mut reader, max_bytes)
@@ -170,6 +202,119 @@ pub async fn receive_archive(
             StoreError::EmptyInput => ReceiptError::EmptyDelivery,
             other => ReceiptError::Storage(other),
         })?;
+    record_stored_archive(database, scope, mode, blob_ref, None).await
+}
+
+/// Receives a Platform-bound archive only when declared identity matches.
+///
+/// # Errors
+///
+/// Returns [`ReceiptError::DeclaredIdentityMismatch`] without publishing raw
+/// bytes when the completed stream differs from Platform's supplied identity.
+pub async fn receive_platform_archive(
+    database: &Database,
+    store: &BlobStore,
+    claim: &TenantClaim,
+    mode: AcquisitionMode,
+    mut reader: impl std::io::Read,
+    max_bytes: u64,
+    identity: &ArchiveIdentity,
+) -> Result<ReceiptOutcome, ReceiptError> {
+    let scope = authenticate_claim(database, claim).await?;
+    let media_type = MediaType::parse(RAW_ARCHIVE_MEDIA_TYPE)?;
+    let blob_ref = store
+        .store_stream_with_identity(
+            media_type,
+            &mut reader,
+            max_bytes,
+            &identity.sha256,
+            identity.byte_size,
+        )
+        .map_err(|error| match error {
+            StoreError::LimitExceeded { limit_bytes } => {
+                ReceiptError::ArchiveTooLarge { limit_bytes }
+            }
+            StoreError::EmptyInput => ReceiptError::EmptyDelivery,
+            StoreError::DeclaredIdentityMismatch => ReceiptError::DeclaredIdentityMismatch,
+            other => ReceiptError::Storage(other),
+        })?;
+    record_stored_archive(database, scope, mode, blob_ref, None).await
+}
+
+/// Receives one Platform archive and durably records its terminal raw-receipt result.
+///
+/// # Errors
+///
+/// Returns a receipt error when scope verification, identity-checked storage,
+/// or the atomic export/run/report transaction cannot complete.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the public Platform receipt contract carries the explicit archive and operation boundaries"
+)]
+pub async fn receive_platform_operation_archive(
+    database: &Database,
+    store: &BlobStore,
+    claim: &TenantClaim,
+    mode: AcquisitionMode,
+    reader: impl std::io::Read,
+    max_bytes: u64,
+    identity: &ArchiveIdentity,
+    operation: PlatformOperation,
+) -> Result<ReceiptOutcome, ReceiptError> {
+    let scope = authenticate_claim(database, claim).await?;
+    let media_type = MediaType::parse(RAW_ARCHIVE_MEDIA_TYPE)?;
+    let blob_ref = store
+        .store_stream_with_identity(
+            media_type,
+            reader,
+            max_bytes,
+            &identity.sha256,
+            identity.byte_size,
+        )
+        .map_err(|error| match error {
+            StoreError::LimitExceeded { limit_bytes } => {
+                ReceiptError::ArchiveTooLarge { limit_bytes }
+            }
+            StoreError::EmptyInput => ReceiptError::EmptyDelivery,
+            StoreError::DeclaredIdentityMismatch => ReceiptError::DeclaredIdentityMismatch,
+            other => ReceiptError::Storage(other),
+        })?;
+    record_stored_archive(database, scope, mode, blob_ref, Some(operation)).await
+}
+
+/// Records a previously verified Platform archive and its terminal raw-receipt report.
+///
+/// Callers must authenticate the scope before streaming and pass only a
+/// [`BlobRef`] produced by the identity-verifying `BlobStore` operation.
+///
+/// # Errors
+///
+/// Returns a receipt error when the durable export, run, or outbox report
+/// cannot be committed atomically.
+pub async fn record_verified_platform_archive(
+    database: &Database,
+    scope: TenantScope,
+    blob_ref: BlobRef,
+    operation: PlatformOperation,
+) -> Result<ReceiptOutcome, ReceiptError> {
+    record_stored_archive(
+        database,
+        scope,
+        AcquisitionMode::ConsumerExport,
+        blob_ref,
+        Some(operation),
+    )
+    .await
+}
+
+/// Records a verified raw archive and starts its import run.
+async fn record_stored_archive(
+    database: &Database,
+    scope: TenantScope,
+    mode: AcquisitionMode,
+    blob_ref: BlobRef,
+    platform_operation: Option<PlatformOperation>,
+) -> Result<ReceiptOutcome, ReceiptError> {
     let digest_bytes = decode_digest_hex(&blob_ref.digest_hex)
         .ok_or(ReceiptError::Storage(StoreError::InvalidIdentity))?;
     let (account_ref, organization_ref) = match scope {
@@ -177,27 +322,29 @@ pub async fn receive_archive(
         TenantScope::Organization(organization) => (None, Some(organization)),
     };
 
-    // One transaction records the snapshot and its first import run; the
-    // archive-hash uniqueness arbitrates duplicates under concurrency.
     let export_id = Uuid::now_v7();
+    let ai_archive_id = Uuid::now_v7();
     let run_id = Uuid::now_v7();
+    let mut transaction = database.pool().begin().await.map_err(ReceiptError::Query)?;
     let insert = sqlx::query(
         "insert into claude_archive.exports
-             (export_id, account_ref, organization_ref, acquisition, archive_hash,
+             (export_id, ai_archive_id, account_ref, organization_ref, acquisition, archive_hash,
               blob_ref, byte_size, received_at)
-         values ($1, $2, $3, $4, $5, $6, $7, now())",
+         values ($1, $2, $3, $4, $5, $6, $7, $8, now())",
     )
     .bind(export_id)
+    .bind(ai_archive_id)
     .bind(account_ref)
     .bind(organization_ref)
     .bind(mode.as_str())
     .bind(digest_bytes.clone())
     .bind(blob_key(&blob_ref))
     .bind(i64::try_from(blob_ref.length_bytes).unwrap_or(i64::MAX))
-    .execute(database.pool())
+    .execute(&mut *transaction)
     .await;
 
     if let Err(error) = insert {
+        drop(transaction);
         if is_archive_hash_conflict(&error) {
             return duplicate_of(database, &digest_bytes).await;
         }
@@ -211,15 +358,72 @@ pub async fn receive_archive(
     .bind(run_id)
     .bind(export_id)
     .bind(ImportState::Received.as_str())
-    .execute(database.pool())
+    .execute(&mut *transaction)
     .await
     .map_err(ReceiptError::Query)?;
+
+    if let Some(operation) = platform_operation {
+        let report = raw_stored_partial(operation, ai_archive_id)?;
+        sqlx::query(
+            "insert into claude_archive.outbox_events
+                 (event_id, event_type, aggregate_type, aggregate_id, payload, occurred_at)
+             values ($1, 'platform.operation.reported.v1', 'operation', $2, $3, now())",
+        )
+        .bind(Uuid::now_v7())
+        .bind(operation.operation_id)
+        .bind(report)
+        .execute(&mut *transaction)
+        .await
+        .map_err(ReceiptError::Query)?;
+    }
+
+    transaction.commit().await.map_err(ReceiptError::Query)?;
 
     Ok(ReceiptOutcome::Stored {
         export_id,
         run_id,
         blob_ref,
     })
+}
+
+/// Builds the only terminal fact raw receipt can honestly establish.
+fn raw_stored_partial(
+    operation: PlatformOperation,
+    ai_archive_id: Uuid,
+) -> Result<serde_json::Value, ReceiptError> {
+    let archive =
+        AiArchiveId::parse(&ai_archive_id.to_string()).map_err(|_| ReceiptError::ReportContract)?;
+    let operation_id = OperationId::parse(&operation.operation_id.to_string())
+        .map_err(|_| ReceiptError::ReportContract)?;
+    let provider = AiProvider::parse("claude").map_err(|_| ReceiptError::ReportContract)?;
+    let result_kind = OperationResultKind::parse("ai_archive.import")
+        .map_err(|_| ReceiptError::ReportContract)?;
+    let report = OperationReported {
+        operation_id,
+        status: OperationStatus::PartiallySucceeded,
+        stage: None,
+        progress_percent: None,
+        results: vec![OperationResultRef {
+            result_kind,
+            target: EntityRef::from(archive),
+            blob: None,
+            ai_archive_import_summary: Some(AiArchiveOperationSummary {
+                ai_archive_id: archive,
+                provider,
+                completeness: AiArchiveCompleteness::Unknown,
+                conversation_count: 0,
+                message_count: 0,
+                asset_count: 0,
+                gap_count: 1,
+                warning_count: 1,
+            }),
+            extensions: Extensions::new(),
+        }],
+        error: None,
+        warnings: Vec::new(),
+        extensions: Extensions::new(),
+    };
+    serde_json::to_value(report).map_err(ReceiptError::ReportEncoding)
 }
 
 /// Verifies a claim against the tenants this archive knows.

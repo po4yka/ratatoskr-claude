@@ -18,6 +18,7 @@ pub mod database;
 pub mod export_projection;
 pub mod external_reference;
 pub mod import_state;
+pub mod operation_outbox;
 pub mod parser_registry;
 pub mod portable_artifact;
 pub mod project_knowledge;
@@ -38,7 +39,9 @@ pub use completeness::{
     ArchiveCompletenessReport, CompletenessCounts, CompletenessStatus, CompletenessWarning,
     CumulativeCompletenessReport,
 };
-pub use config::{AdminConfig, Config, ConfigError, Limits, StorageConfig, TelemetryConfig};
+pub use config::{
+    AdminConfig, Config, ConfigError, Limits, ReceiptConfig, StorageConfig, TelemetryConfig,
+};
 pub use database::{Database, PersistenceError};
 pub use export_projection::{
     Artifact, ArtifactVersion, ConsumerExportParser, ContentPart, Conversation, ExportParseError,
@@ -50,6 +53,7 @@ pub use external_reference::{
     ExternalReferenceKind, LocalBackupStatus, LocalEvidence, derive_local_backup_status,
 };
 pub use import_state::{ImportError, ImportRunStore, ImportState, TransitionOutcome};
+pub use operation_outbox::OperationReportOutbox;
 pub use parser_registry::{
     DetectedSchema, ParserCapability, ParserDescriptor, ParserRegistry, ParserRegistryError,
     ParserSelectionError,
@@ -61,7 +65,10 @@ pub use project_knowledge::{
     KnowledgeFileAnomaly, KnowledgeFileAvailability, ProjectKnowledgeIngestResult,
     ProjectKnowledgeIngestor,
 };
-pub use receipt::{AcquisitionMode, ReceiptError, ReceiptOutcome, TenantClaim, TenantScope};
+pub use receipt::{
+    AcquisitionMode, ArchiveIdentity, PlatformOperation, ReceiptError, ReceiptOutcome, TenantClaim,
+    TenantScope,
+};
 pub use telemetry::{TelemetryError, TelemetryGuard, init_telemetry};
 
 #[cfg(feature = "test-support")]

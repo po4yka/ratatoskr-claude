@@ -16,7 +16,8 @@ use std::path::Path;
 use ratatoskr_claude_archive::blob_store::scratch::{remove, temp_root};
 use ratatoskr_claude_archive::test_support::TestDatabase;
 use ratatoskr_claude_archive::{
-    AcquisitionMode, BlobStore, ImportRunStore, ReceiptError, ReceiptOutcome, TenantClaim,
+    AcquisitionMode, ArchiveIdentity, BlobStore, ImportRunStore, OperationReportOutbox,
+    PlatformOperation, ReceiptError, ReceiptOutcome, TenantClaim,
 };
 use sqlx::Row as _;
 use uuid::Uuid;
@@ -441,5 +442,154 @@ async fn empty_stream_is_refused() {
     );
 
     remove(&blob_root);
+    db.cleanup().await.expect("cleanup succeeds");
+}
+
+#[tokio::test]
+async fn platform_archive_receipt_refuses_mismatched_digest_without_storing() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let account_id = seed_account(db.database.pool()).await;
+    let claim = TenantClaim {
+        account: Some(account_id),
+        organization: None,
+    };
+    let (blob_root, store) = open_store("receipt-platform-mismatch");
+    let payload = b"platform receipt identity mismatch";
+
+    let refused = ratatoskr_claude_archive::receipt::receive_platform_archive(
+        &db.database,
+        &store,
+        &claim,
+        AcquisitionMode::ConsumerExport,
+        std::io::Cursor::new(payload),
+        10 * 1024 * 1024 * 1024,
+        &ArchiveIdentity {
+            sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            byte_size: u64::try_from(payload.len()).expect("the fixture length fits"),
+        },
+    )
+    .await
+    .expect_err("a Platform identity mismatch must be refused");
+
+    assert!(
+        matches!(refused, ReceiptError::DeclaredIdentityMismatch),
+        "the refusal identifies the supplied digest/length contract, got: {refused}"
+    );
+    assert_eq!(
+        export_count(db.database.pool()).await,
+        0,
+        "no export row survives a declared identity mismatch"
+    );
+    assert!(
+        object_files(&blob_root).is_empty(),
+        "no raw object is published for a declared identity mismatch"
+    );
+
+    remove(&blob_root);
+    db.cleanup().await.expect("cleanup succeeds");
+}
+
+#[tokio::test]
+async fn platform_archive_receipt_records_one_unknown_partial_terminal_report() {
+    use sha2::{Digest as _, Sha256};
+
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let account_id = seed_account(db.database.pool()).await;
+    let claim = TenantClaim {
+        account: Some(account_id),
+        organization: None,
+    };
+    let (blob_root, store) = open_store("receipt-platform-terminal-report");
+    let payload = b"platform receipt terminal report";
+    let digest = format!("{:x}", Sha256::digest(payload));
+    let operation_id = Uuid::now_v7();
+
+    ratatoskr_claude_archive::receipt::receive_platform_operation_archive(
+        &db.database,
+        &store,
+        &claim,
+        AcquisitionMode::ConsumerExport,
+        std::io::Cursor::new(payload),
+        10 * 1024 * 1024 * 1024,
+        &ArchiveIdentity {
+            sha256: digest,
+            byte_size: u64::try_from(payload.len()).expect("the fixture length fits"),
+        },
+        PlatformOperation { operation_id },
+    )
+    .await
+    .expect("a verified Platform archive is stored");
+
+    let reports = sqlx::query(
+        "select payload from claude_archive.outbox_events
+         where event_type = 'platform.operation.reported.v1' and aggregate_id = $1",
+    )
+    .bind(operation_id)
+    .fetch_all(db.database.pool())
+    .await
+    .expect("the outbox query succeeds");
+    assert_eq!(
+        reports.len(),
+        1,
+        "one stored Platform operation produces one durable terminal report"
+    );
+    let payload: serde_json::Value = reports[0].get("payload");
+    assert_eq!(payload["status"], "partially_succeeded");
+    assert_eq!(
+        payload["results"][0]["ai_archive_import_summary"]["provider"],
+        "claude"
+    );
+    assert_eq!(
+        payload["results"][0]["ai_archive_import_summary"]["completeness"],
+        "unknown"
+    );
+    assert_eq!(
+        payload["results"][0]["ai_archive_import_summary"]["gap_count"],
+        1
+    );
+
+    remove(&blob_root);
+    db.cleanup().await.expect("cleanup succeeds");
+}
+
+#[tokio::test]
+async fn failed_operation_report_publication_leaves_the_outbox_row_pending() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let event_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into claude_archive.outbox_events
+             (event_id, event_type, aggregate_type, aggregate_id, payload, occurred_at)
+         values ($1, 'platform.operation.reported.v1', 'operation', $2, '{}'::jsonb, now())",
+    )
+    .bind(event_id)
+    .bind(Uuid::now_v7())
+    .execute(db.database.pool())
+    .await
+    .expect("the pending report inserts");
+
+    let publisher = OperationReportOutbox::new(db.database.pool().clone());
+    let failure = publisher
+        .publish_pending_once("nats://127.0.0.1:1")
+        .await
+        .expect_err("an unreachable broker leaves the durable report pending");
+    assert!(
+        failure.to_string().contains("broker"),
+        "the bounded publisher reports the broker class"
+    );
+    let was_published: bool = sqlx::query_scalar(
+        "select published_at is not null from claude_archive.outbox_events where event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(db.database.pool())
+    .await
+    .expect("the row remains readable");
+    assert!(!was_published, "the failed report remains pending");
+
     db.cleanup().await.expect("cleanup succeeds");
 }

@@ -130,6 +130,9 @@ pub enum StoreError {
     /// A streamed ingest delivered no bytes at all.
     #[error("the stream delivered no bytes")]
     EmptyInput,
+    /// A caller-supplied digest or length does not match the completed stream.
+    #[error("the completed stream differs from its declared identity")]
+    DeclaredIdentityMismatch,
 }
 
 /// The content-addressed store rooted at this service's own directory.
@@ -204,6 +207,43 @@ impl BlobStore {
                 return Err(error);
             }
         };
+
+        let length = usize::try_from(total).unwrap_or(usize::MAX);
+        let placed = self.publish_staged(media_type, &staging_path, &digest_hex, length);
+        let _ignored = fs::remove_file(&staging_path);
+        placed
+    }
+
+    /// Stores a stream only when its completed digest and length equal the
+    /// independently declared identity.
+    ///
+    /// The comparison happens while the bytes are still private staging data,
+    /// so a declaration mismatch cannot publish a raw object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::DeclaredIdentityMismatch`] when the completed
+    /// stream differs from either declared field, with no durable object.
+    pub fn store_stream_with_identity(
+        &self,
+        media_type: MediaType,
+        mut reader: impl io::Read,
+        max_bytes: u64,
+        expected_digest_hex: &str,
+        expected_length_bytes: u64,
+    ) -> Result<BlobRef, StoreError> {
+        let staging_path = self.root.join("staging").join(Uuid::now_v7().to_string());
+        let (digest_hex, total) = match stage_stream(&staging_path, &mut reader, max_bytes) {
+            Ok(pair) => pair,
+            Err(error) => {
+                let _ignored = fs::remove_file(&staging_path);
+                return Err(error);
+            }
+        };
+        if digest_hex != expected_digest_hex || total != expected_length_bytes {
+            let _ignored = fs::remove_file(&staging_path);
+            return Err(StoreError::DeclaredIdentityMismatch);
+        }
 
         let length = usize::try_from(total).unwrap_or(usize::MAX);
         let placed = self.publish_staged(media_type, &staging_path, &digest_hex, length);
