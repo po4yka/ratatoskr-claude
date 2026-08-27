@@ -18,13 +18,18 @@ pub mod database;
 pub mod events;
 pub mod export_projection;
 pub mod external_reference;
+pub mod fixture_admission;
 pub mod import_state;
 pub mod knowledge_link;
 pub mod operation_outbox;
+pub mod parser_migration;
 pub mod parser_registry;
 pub mod portable_artifact;
+pub mod portable_export;
+pub mod privacy_deletion;
 pub mod project_knowledge;
 pub mod receipt;
+pub mod reparse;
 pub mod telemetry;
 
 pub use archive_inspection::{
@@ -58,8 +63,13 @@ pub use external_reference::{
 pub use import_state::{ImportError, ImportRunStore, ImportState, TransitionOutcome};
 pub use knowledge_link::{KnowledgeLinkError, KnowledgeLinkOutcome, KnowledgeLinkStore};
 pub use operation_outbox::OperationReportOutbox;
+pub use parser_migration::{
+    ParserMigrationEntry, ParserMigrationEntryStatus, ParserMigrationPlan, ParserMigrationReport,
+    ParserMigrationStatus,
+};
 pub use parser_registry::{
-    DetectedSchema, ParserCapability, ParserDescriptor, ParserRegistry, ParserRegistryError,
+    CompiledParser, DetectedSchema, ParserCapability, ParserDescriptor, ParserExecutionError,
+    ParserExecutionInput, ParserExecutor, ParserIdentity, ParserRegistry, ParserRegistryError,
     ParserSelectionError,
 };
 pub use portable_artifact::{
@@ -72,6 +82,10 @@ pub use project_knowledge::{
 pub use receipt::{
     AcquisitionMode, ArchiveIdentity, PlatformOperation, ReceiptError, ReceiptOutcome, TenantClaim,
     TenantScope,
+};
+pub use reparse::{
+    ReparseChange, ReparseChangeKind, ReparseEngine, ReparseError, ReparsePlan, ReparseReport,
+    ReparseWarning,
 };
 pub use telemetry::{TelemetryError, TelemetryGuard, init_telemetry};
 

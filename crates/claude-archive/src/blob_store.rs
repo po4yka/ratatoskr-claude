@@ -86,6 +86,15 @@ pub struct BlobRef {
     pub length_bytes: u64,
 }
 
+/// Result of an exact idempotent `BlobStore` erasure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraseOutcome {
+    /// The exact owned object was removed.
+    Erased,
+    /// The exact owned object was already absent.
+    AlreadyAbsent,
+}
+
 /// Blob storage failure. Text carries classes, paths under the root, and
 /// digests only — never stored bytes.
 #[derive(Debug, thiserror::Error)]
@@ -273,6 +282,40 @@ impl BlobStore {
         self.open_verified(reference).map(|_| ())
     }
 
+    /// Erases exactly the locally owned object named by `reference`.
+    ///
+    /// Repeating an erasure is successful and reports
+    /// [`EraseOutcome::AlreadyAbsent`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the reference is not a valid locally owned
+    /// content address or storage cannot complete the erasure.
+    pub fn erase(&self, reference: &BlobRef) -> Result<EraseOutcome, StoreError> {
+        Self::validate_identity(reference)?;
+        let target = self.path_for_digest(&reference.digest_hex);
+        self.validate_target_parent(&target)?;
+        match fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(EraseOutcome::AlreadyAbsent);
+            }
+            Err(error) => return Err(error.into()),
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(StoreError::InvalidIdentity);
+            }
+            Ok(_) => {}
+        }
+        drop(self.open_verified(reference)?);
+        self.validate_target_parent(&target)?;
+        match fs::remove_file(target) {
+            Ok(()) => Ok(EraseOutcome::Erased),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Ok(EraseOutcome::AlreadyAbsent)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Answers whether the store can hold bytes right now.
     ///
     /// A write-read-delete round trip of one probe file through staging: a
@@ -348,19 +391,39 @@ impl BlobStore {
 
     /// Checks a reference belongs here and names its object.
     fn resolve(&self, reference: &BlobRef) -> Result<PathBuf, StoreError> {
-        if reference.owner_service != OWNER_SERVICE
-            || reference.algorithm != DigestAlgorithm::Sha256
-            || !is_canonical_sha256(&reference.digest_hex)
-        {
-            return Err(StoreError::InvalidIdentity);
-        }
+        Self::validate_identity(reference)?;
         let target = self.path_for_digest(&reference.digest_hex);
+        self.validate_target_parent(&target)?;
         if !target.is_file() {
             return Err(StoreError::Missing {
                 digest_hex: reference.digest_hex.clone(),
             });
         }
         Ok(target)
+    }
+
+    fn validate_target_parent(&self, target: &Path) -> Result<(), StoreError> {
+        let object_root = fs::canonicalize(self.root.join("sha256"))?;
+        let parent = target.parent().ok_or(StoreError::InvalidIdentity)?;
+        let canonical_parent = match fs::canonicalize(parent) {
+            Ok(path) => path,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if !canonical_parent.starts_with(object_root) {
+            return Err(StoreError::InvalidIdentity);
+        }
+        Ok(())
+    }
+
+    fn validate_identity(reference: &BlobRef) -> Result<(), StoreError> {
+        if reference.owner_service != OWNER_SERVICE
+            || reference.algorithm != DigestAlgorithm::Sha256
+            || !is_canonical_sha256(&reference.digest_hex)
+        {
+            return Err(StoreError::InvalidIdentity);
+        }
+        Ok(())
     }
 
     /// Opens one verified object at its beginning without materializing it.

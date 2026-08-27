@@ -1,0 +1,21 @@
+{
+  "format": "ratatoskr-owner-derived-fixture",
+  "case_id": "synthetic-conversation-shape",
+  "acquisition_mode": "consumer_export",
+  "schema_id": "claude.synthetic.owner-derived",
+  "private_evidence_record": "OWNER-EVIDENCE-0001",
+  "fixture": "derived.json",
+  "observed_structure": "observed-structure.json",
+  "expected_structure": "expected-structure.json",
+  "synthetic_only": true,
+  "reviews": {
+    "consent": true,
+    "license": true,
+    "secret_scan": true,
+    "personal_data_scan": true,
+    "path_safety": true,
+    "deterministic_comparison": true,
+    "independent_review": true,
+    "owner_approval": true
+  }
+}

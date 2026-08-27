@@ -18,7 +18,7 @@ use uuid::Uuid;
 use ratatoskr_claude_archive::test_support::TestDatabase;
 
 /// The tables the service owns, from the AGENTS.md conceptual data list.
-const OWNED_TABLES: [&str; 21] = [
+const OWNED_TABLES: [&str; 29] = [
     "accounts",
     "organizations",
     "exports",
@@ -37,9 +37,28 @@ const OWNED_TABLES: [&str; 21] = [
     "revisions",
     "tombstones",
     "completeness_reports",
+    "export_observations",
+    "extracted_artifacts",
+    "portable_exports",
+    "privacy_deletion_requests",
+    "privacy_deletion_items",
+    "privacy_deletion_audits",
+    "reparse_runs",
+    "parser_migration_reports",
     "outbox_events",
     "knowledge_analysis_links",
     "inbox_events",
+];
+
+const LIFECYCLE_TABLES: [&str; 8] = [
+    "export_observations",
+    "extracted_artifacts",
+    "portable_exports",
+    "privacy_deletion_requests",
+    "privacy_deletion_items",
+    "privacy_deletion_audits",
+    "reparse_runs",
+    "parser_migration_reports",
 ];
 
 async fn table_inventory(pool: &sqlx::PgPool) -> BTreeSet<String> {
@@ -67,6 +86,130 @@ async fn column_inventory(pool: &sqlx::PgPool, table: &str) -> BTreeSet<String> 
     rows.into_iter()
         .map(|row| row.get::<String, _>(0))
         .collect()
+}
+
+async fn assert_lifecycle_columns(pool: &sqlx::PgPool) {
+    for (relation, required_columns) in [
+        (
+            "export_observations",
+            &["export_id", "subject_kind", "subject_id"][..],
+        ),
+        (
+            "extracted_artifacts",
+            &["export_id", "blob_ref", "content_hash"][..],
+        ),
+        (
+            "portable_exports",
+            &[
+                "portable_export_id",
+                "tenant_ref",
+                "state",
+                "manifest_hash",
+                "correlation_id",
+            ][..],
+        ),
+        (
+            "privacy_deletion_requests",
+            &[
+                "request_id",
+                "tenant_ref",
+                "request_key",
+                "scope_kind",
+                "state",
+                "correlation_id",
+            ][..],
+        ),
+        (
+            "privacy_deletion_items",
+            &["request_id", "item_kind", "subject_id", "state"][..],
+        ),
+        (
+            "privacy_deletion_audits",
+            &[
+                "request_id",
+                "scope_kind",
+                "category_counts",
+                "correlation_id",
+                "outcome",
+                "evidence_blob_ref",
+            ][..],
+        ),
+        (
+            "reparse_runs",
+            &[
+                "reparse_run_id",
+                "tenant_ref",
+                "export_id",
+                "parser_name",
+                "parser_version",
+                "plan_fingerprint",
+                "dry_run",
+                "state",
+            ][..],
+        ),
+        (
+            "parser_migration_reports",
+            &[
+                "migration_report_id",
+                "tenant_ref",
+                "parser_name",
+                "parser_version",
+                "plan_fingerprint",
+                "state",
+                "report",
+            ][..],
+        ),
+    ] {
+        let columns = column_inventory(pool, relation).await;
+        for column in required_columns {
+            assert!(
+                columns.contains(*column),
+                "{relation} must expose the {column} column"
+            );
+        }
+    }
+}
+
+async fn assert_lifecycle_constraints(pool: &sqlx::PgPool) {
+    let constraints = sqlx::query(
+        "select table_name, constraint_type
+         from information_schema.table_constraints
+         where constraint_schema = 'claude_archive' and table_name = any($1)",
+    )
+    .bind(LIFECYCLE_TABLES.as_slice())
+    .fetch_all(pool)
+    .await
+    .expect("the constraint catalog query succeeds");
+    for relation in LIFECYCLE_TABLES {
+        let kinds: BTreeSet<String> = constraints
+            .iter()
+            .filter(|row| row.get::<String, _>("table_name") == relation)
+            .map(|row| row.get::<String, _>("constraint_type"))
+            .collect();
+        assert!(
+            kinds.contains("PRIMARY KEY"),
+            "{relation} needs a primary key"
+        );
+        assert!(kinds.contains("CHECK"), "{relation} needs closed checks");
+    }
+}
+
+async fn assert_privacy_tombstone_deduplication(pool: &sqlx::PgPool) {
+    let index: Option<String> = sqlx::query_scalar(
+        "select indexdef from pg_indexes
+         where schemaname = 'claude_archive'
+           and tablename = 'outbox_events'
+           and indexdef ilike '%unique%'
+           and indexdef like '%ai_archive.subject.tombstoned.v1%'
+         limit 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .expect("the outbox index catalog query succeeds");
+    assert!(
+        index.is_some(),
+        "privacy deletion needs outbox tombstone uniqueness"
+    );
 }
 
 #[tokio::test]
@@ -162,6 +305,34 @@ async fn fresh_schema_exposes_backup_status_and_transition_audits() {
             "backup-status audit requires the {column} column"
         );
     }
+
+    db.cleanup().await.expect("cleanup succeeds");
+}
+
+#[tokio::test]
+async fn schema_exposes_portable_privacy_reparse_and_provenance_relations() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a fresh disposable database applies the definition");
+    db.database
+        .apply_schema()
+        .await
+        .expect("the current definition applies idempotently a second time");
+    let pool = db.database.pool();
+
+    let inventory = table_inventory(pool).await;
+    let missing_relations: Vec<&str> = LIFECYCLE_TABLES
+        .iter()
+        .copied()
+        .filter(|relation| !inventory.contains(*relation))
+        .collect();
+    assert!(
+        missing_relations.is_empty(),
+        "the current schema is missing lifecycle relations: {missing_relations:?}"
+    );
+    assert_lifecycle_columns(pool).await;
+    assert_lifecycle_constraints(pool).await;
+    assert_privacy_tombstone_deduplication(pool).await;
 
     db.cleanup().await.expect("cleanup succeeds");
 }

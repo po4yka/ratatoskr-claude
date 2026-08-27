@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
+use ratatoskr_claude_archive::blob_store::EraseOutcome;
 use ratatoskr_claude_archive::blob_store::scratch::{remove, temp_root};
 use ratatoskr_claude_archive::{BlobRef, BlobStore, DigestAlgorithm, MediaType, StoreError};
 
@@ -57,6 +58,66 @@ fn object_files(root: &Path) -> Vec<std::path::PathBuf> {
         }
     }
     found
+}
+
+#[cfg(unix)]
+struct SymlinkEraseAttempt {
+    refusal: Result<EraseOutcome, StoreError>,
+    sentinel_after: Result<Vec<u8>, StoreError>,
+    sentinel_bytes: Vec<u8>,
+}
+
+#[cfg(unix)]
+fn attempt_erase_through_symlinked_bucket(
+    root: &Path,
+    store: &BlobStore,
+    selected: &BlobRef,
+    sibling: &BlobRef,
+) -> SymlinkEraseAttempt {
+    use std::os::unix::fs::symlink;
+
+    let (external_root, external_store) = open_store("erase-external-sentinel");
+    let local_prefixes = [
+        selected
+            .digest_hex
+            .get(..2)
+            .expect("canonical digest prefix"),
+        sibling
+            .digest_hex
+            .get(..2)
+            .expect("canonical digest prefix"),
+    ];
+    let external_payload = (0..=u16::MAX)
+        .map(|nonce| format!("owned external sentinel {nonce}"))
+        .find(|payload| {
+            let digest = one_shot_digest_hex(payload.as_bytes());
+            !local_prefixes.contains(&digest.get(..2).expect("canonical digest prefix"))
+        })
+        .expect("a distinct digest bucket exists");
+    let external = external_store
+        .store(
+            MediaType::parse(MEDIA_TYPE).expect("the fixture media type is valid"),
+            external_payload.as_bytes(),
+        )
+        .expect("the external test-owned sentinel stores");
+    let prefix = external
+        .digest_hex
+        .get(..2)
+        .expect("canonical digest prefix");
+    symlink(
+        external_root.join("sha256").join(prefix),
+        root.join("sha256").join(prefix),
+    )
+    .expect("the test creates its owned malicious bucket symlink");
+
+    let refusal = store.erase(&external);
+    let sentinel_after = external_store.read(&external);
+    remove(&external_root);
+    SymlinkEraseAttempt {
+        refusal,
+        sentinel_after,
+        sentinel_bytes: external_payload.into_bytes(),
+    }
 }
 
 #[test]
@@ -369,4 +430,136 @@ fn streamed_ingest_preserves_write_once_deduplication() {
         "exactly one object exists for the digest"
     );
     remove(&root);
+}
+
+#[test]
+fn erase_is_exact_and_idempotent() {
+    let (root, store) = open_store("erase-exact");
+    let selected = store
+        .store(
+            MediaType::parse(MEDIA_TYPE).unwrap(),
+            b"selected object to erase",
+        )
+        .expect("the selected object stores");
+    let sibling_bytes = b"distinct sibling must remain";
+    let sibling = store
+        .store(MediaType::parse(MEDIA_TYPE).unwrap(), sibling_bytes)
+        .expect("the sibling object stores");
+
+    let first = store.erase(&selected);
+    let selected_after_first = store.read(&selected);
+    let sibling_after_first = store.read(&sibling);
+    let second = store.erase(&selected);
+    let selected_after_second = store.read(&selected);
+    let sibling_after_second = store.read(&sibling);
+    remove(&root);
+
+    assert_eq!(first.expect("first erase succeeds"), EraseOutcome::Erased);
+    assert!(
+        matches!(selected_after_first, Err(StoreError::Missing { .. })),
+        "the selected object must be absent after its first erase"
+    );
+    assert_eq!(
+        sibling_after_first.expect("sibling remains readable after first erase"),
+        sibling_bytes
+    );
+    assert_eq!(
+        second.expect("second erase is idempotent success"),
+        EraseOutcome::AlreadyAbsent
+    );
+    assert!(matches!(
+        selected_after_second,
+        Err(StoreError::Missing { .. })
+    ));
+    assert_eq!(
+        sibling_after_second.expect("sibling remains readable after repeated erase"),
+        sibling_bytes
+    );
+}
+
+#[test]
+fn erase_refuses_foreign_and_malformed_references() {
+    let (root, store) = open_store("erase-refusals");
+    let selected_bytes = b"selected local object";
+    let selected = store
+        .store(MediaType::parse(MEDIA_TYPE).unwrap(), selected_bytes)
+        .expect("the selected local object stores");
+    let sibling_bytes = b"sibling local object";
+    let sibling = store
+        .store(MediaType::parse(MEDIA_TYPE).unwrap(), sibling_bytes)
+        .expect("the sibling local object stores");
+
+    let mut foreign_owner = selected.clone();
+    foreign_owner.owner_service = "ratatoskr-foreign-owner".to_owned();
+    let mut uppercase_digest = selected.clone();
+    uppercase_digest.digest_hex = selected.digest_hex.to_ascii_uppercase();
+    let mut short_digest = selected.clone();
+    short_digest.digest_hex = "00".repeat(31);
+    let mut non_hex_digest = selected.clone();
+    non_hex_digest.digest_hex = "g0".repeat(32);
+    let mut wrong_length = selected.clone();
+    wrong_length.length_bytes += 1;
+
+    let refusals = [
+        ("foreign owner", store.erase(&foreign_owner), false),
+        ("uppercase digest", store.erase(&uppercase_digest), false),
+        ("short digest", store.erase(&short_digest), false),
+        ("non-hex digest", store.erase(&non_hex_digest), false),
+        ("wrong length", store.erase(&wrong_length), true),
+    ];
+    let selected_after_malformed = store.read(&selected);
+    let sibling_after_malformed = store.read(&sibling);
+
+    // DigestAlgorithm currently has exactly one representable variant, so an
+    // algorithm-confusion reference cannot be constructed without unsafe code.
+    // The containment case instead presents a fully valid SHA-256 identity
+    // through an intermediate bucket symlink, all inside test-owned scratch.
+    #[cfg(unix)]
+    let containment = attempt_erase_through_symlinked_bucket(&root, &store, &selected, &sibling);
+
+    let selected_after_containment = store.read(&selected);
+    let sibling_after_containment = store.read(&sibling);
+    remove(&root);
+
+    for (label, refusal, expect_mismatch) in refusals {
+        let refused_as_expected = if expect_mismatch {
+            matches!(refusal, Err(StoreError::Mismatch { .. }))
+        } else {
+            matches!(refusal, Err(StoreError::InvalidIdentity))
+        };
+        assert!(refused_as_expected, "{label} must be refused");
+    }
+    assert_eq!(
+        selected_after_malformed.expect("malformed erasures preserve selected"),
+        selected_bytes
+    );
+    assert_eq!(
+        sibling_after_malformed.expect("malformed erasures preserve sibling"),
+        sibling_bytes
+    );
+    assert_eq!(
+        selected_after_containment.expect("containment attempt preserves selected"),
+        selected_bytes
+    );
+    assert_eq!(
+        sibling_after_containment.expect("containment attempt preserves sibling"),
+        sibling_bytes
+    );
+
+    #[cfg(unix)]
+    {
+        let SymlinkEraseAttempt {
+            refusal,
+            sentinel_after,
+            sentinel_bytes,
+        } = containment;
+        assert!(
+            matches!(refusal, Err(StoreError::InvalidIdentity)),
+            "a symlinked digest bucket must be refused before external erasure: {refusal:?}"
+        );
+        assert_eq!(
+            sentinel_after.expect("external test-owned sentinel remains"),
+            sentinel_bytes
+        );
+    }
 }

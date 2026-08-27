@@ -12,6 +12,7 @@
 //! (`EX_CONFIG`) configuration unreadable or invalid.
 
 use std::future::IntoFuture as _;
+use std::io::Write as _;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +22,13 @@ use ratatoskr_claude_archive::blob_store::BlobStore;
 use ratatoskr_claude_archive::telemetry::SERVICE_NAME;
 use ratatoskr_claude_archive::{Config, Database};
 use ratatoskr_claude_archive_service::RuntimeState;
+use ratatoskr_claude_archive_service::lifecycle_commands::{
+    LifecycleCommandResult, ParserMigrateExecution, PortableExportExecution,
+    PrivacyDeleteExecuteExecution, PrivacyDeletePlanExecution, ReparseExecution,
+    run_parser_migrate_command, run_portable_export_command, run_privacy_delete_execute_command,
+    run_privacy_delete_plan_command, run_reparse_command,
+};
+use ratatoskr_claude_archive_service::operator_commands::OperatorContext;
 use secrecy::ExposeSecret as _;
 
 /// How often the prober copies the dependency answers into the readiness
@@ -36,10 +44,128 @@ fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("check-config") {
         return check_config();
     }
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .is_some_and(|command| {
+            matches!(
+                command,
+                "portable-export"
+                    | "privacy-delete"
+                    | "reparse"
+                    | "parser-migrate"
+                    | "fixture-admit"
+            )
+        })
+    {
+        return operator_command(arguments);
+    }
     match tokio_main() {
         Ok(()) => ExitCode::SUCCESS,
         Err(exit) => exit,
     }
+}
+
+fn operator_command(arguments: Vec<std::ffi::OsString>) -> ExitCode {
+    if arguments.first().and_then(|value| value.to_str()) == Some("fixture-admit") {
+        return fixture_admit(&arguments);
+    }
+    let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    else {
+        return ExitCode::FAILURE;
+    };
+    let first = arguments.first().and_then(|value| value.to_str());
+    let second = arguments.get(1).and_then(|value| value.to_str());
+    let result =
+        match (first, second) {
+            (Some("portable-export"), _) => run_portable_export_command(arguments, |command| {
+                match runtime.block_on(OperatorContext::open()) {
+                    Ok(context) => runtime.block_on(context.portable_export(command)),
+                    Err(error_code) => PortableExportExecution::Failed { error_code },
+                }
+            }),
+            (Some("privacy-delete"), Some("plan")) => {
+                run_privacy_delete_plan_command(arguments, |command| {
+                    match runtime.block_on(OperatorContext::open()) {
+                        Ok(context) => runtime.block_on(context.privacy_plan(command)),
+                        Err(error_code) => PrivacyDeletePlanExecution::Failed { error_code },
+                    }
+                })
+            }
+            (Some("privacy-delete"), Some("execute")) => {
+                run_privacy_delete_execute_command(arguments, |command| {
+                    match runtime.block_on(OperatorContext::open()) {
+                        Ok(context) => runtime.block_on(context.privacy_execute(command)),
+                        Err(error_code) => PrivacyDeleteExecuteExecution::Failed { error_code },
+                    }
+                })
+            }
+            (Some("reparse"), _) => run_reparse_command(arguments, |command| {
+                match runtime.block_on(OperatorContext::open()) {
+                    Ok(context) => runtime.block_on(context.reparse(command)),
+                    Err(error_code) => ReparseExecution::Failed { error_code },
+                }
+            }),
+            (Some("parser-migrate"), _) => run_parser_migrate_command(arguments, |command| {
+                match runtime.block_on(OperatorContext::open()) {
+                    Ok(context) => runtime.block_on(context.parser_migrate(command)),
+                    Err(error_code) => ParserMigrateExecution::Failed { error_code },
+                }
+            }),
+            _ => LifecycleCommandResult {
+                exit_code: 2,
+                stdout: Vec::new(),
+                stderr: b"invalid lifecycle command\n".to_vec(),
+            },
+        };
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    emit_command_result(&result)
+}
+
+fn fixture_admit(arguments: &[std::ffi::OsString]) -> ExitCode {
+    let candidate = match arguments {
+        [command, flag, path]
+            if command.to_str() == Some("fixture-admit")
+                && flag.to_str() == Some("--candidate") =>
+        {
+            std::path::Path::new(path)
+        }
+        _ => {
+            eprintln!("usage: fixture-admit --candidate PATH");
+            return ExitCode::from(2);
+        }
+    };
+    let Ok(report) =
+        ratatoskr_claude_archive::fixture_admission::FixtureAdmission::inspect(candidate)
+    else {
+        let _ = std::io::stdout().write_all(
+            b"{\"case_id\":null,\"findings\":[\"candidate_unreadable\"],\"status\":\"rejected\"}\n",
+        );
+        return ExitCode::FAILURE;
+    };
+    let admitted = report.status
+        == ratatoskr_claude_archive::fixture_admission::FixtureAdmissionStatus::Admitted;
+    match serde_json::to_string(&report) {
+        Ok(json) => {
+            let _ = std::io::stdout().write_all(json.as_bytes());
+            let _ = std::io::stdout().write_all(b"\n");
+        }
+        Err(_) => return ExitCode::FAILURE,
+    }
+    if admitted {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn emit_command_result(result: &LifecycleCommandResult) -> ExitCode {
+    let _ = std::io::stdout().write_all(&result.stdout);
+    let _ = std::io::stderr().write_all(&result.stderr);
+    ExitCode::from(result.exit_code)
 }
 
 /// `<binary> check-config`: load and validate without binding anything.

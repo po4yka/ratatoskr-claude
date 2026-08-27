@@ -7,6 +7,7 @@
 - `DATA_MODEL.md` — planned `claude_archive` schema.
 - `THREAT_MODEL.md` — archive, parser, privacy, Artifact, reference, and Compliance risks.
 - `TESTING.md` — fixtures, parser, graph/version, completeness, and security tests.
+- `testing/OWNER_FIXTURE_DISCOVERY.md` — private owner-evidence minimization and golden admission.
 - `IMPLEMENTATION_PLAN.md` — ordered archive vertical slices.
 - `adr/README.md` — decision process.
 

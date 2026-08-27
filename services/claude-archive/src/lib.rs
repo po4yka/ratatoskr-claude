@@ -29,6 +29,9 @@ use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::SyncIoBridge;
 use uuid::Uuid;
 
+pub mod lifecycle_commands;
+pub mod operator_commands;
+
 /// No probe of this dependency has answered yet.
 const COMPONENT_ABSENT: u8 = 0;
 /// The last probe answered.

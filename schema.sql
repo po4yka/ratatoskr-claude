@@ -522,6 +522,193 @@ comment on constraint completeness_reports_status_check on claude_archive.comple
     '`complete` requires positive evidence from a known schema; it is never the default.';
 
 -- ---------------------------------------------------------------------------------------------
+-- export observations and extracted artifacts
+-- ---------------------------------------------------------------------------------------------
+--
+-- First/last-seen projection columns cannot prove which retained raw export evidenced a subject.
+-- These explicit edges are the authority for scoped deletion and reparse comparison.
+
+create table claude_archive.export_observations (
+    export_id    uuid        not null references claude_archive.exports (export_id) on delete cascade,
+    subject_kind text        not null,
+    subject_id   uuid        not null,
+    observed_at  timestamptz not null default now(),
+    constraint export_observations_pkey primary key (export_id, subject_kind, subject_id),
+    constraint export_observations_subject_kind_check
+        check (subject_kind in ('project', 'project_source', 'conversation', 'message',
+                                'content_part', 'artifact', 'artifact_version', 'asset',
+                                'external_reference')),
+    constraint export_observation_identity_unique unique (export_id, subject_kind, subject_id)
+);
+
+comment on table claude_archive.export_observations is
+    'Explicit raw-export provenance for every normalized subject observation.';
+
+create table claude_archive.extracted_artifacts (
+    extracted_artifact_id uuid        primary key,
+    export_id              uuid        not null references claude_archive.exports (export_id) on delete cascade,
+    artifact_index         integer     not null check (artifact_index >= 0),
+    artifact_kind          text        not null,
+    blob_ref               text        not null,
+    content_hash           bytea       not null,
+    byte_size              bigint      not null check (byte_size >= 0),
+    recorded_at            timestamptz not null default now(),
+    constraint extracted_artifacts_kind_check
+        check (artifact_kind in ('entry', 'asset', 'manifest', 'unknown')),
+    constraint extracted_artifact_identity_unique unique (export_id, artifact_index)
+);
+
+comment on table claude_archive.extracted_artifacts is
+    'Bounded extraction outputs whose storage keys never derive from provider filenames.';
+
+-- ---------------------------------------------------------------------------------------------
+-- portable export operations
+-- ---------------------------------------------------------------------------------------------
+
+create table claude_archive.portable_exports (
+    portable_export_id uuid        primary key,
+    tenant_ref         text        not null,
+    state              text        not null,
+    filters            jsonb       not null default '{}',
+    manifest_hash      bytea,
+    output_blob_ref    text,
+    correlation_id     text        not null,
+    started_at         timestamptz not null default now(),
+    completed_at       timestamptz,
+    constraint portable_exports_state_check
+        check (state in ('requested', 'rendering', 'completed', 'failed')),
+    constraint portable_exports_filters_object_check check (jsonb_typeof(filters) = 'object'),
+    constraint portable_exports_operation_unique unique (tenant_ref, correlation_id)
+);
+
+comment on table claude_archive.portable_exports is
+    'Content-free operation state for tenant-scoped deterministic local exports.';
+
+-- ---------------------------------------------------------------------------------------------
+-- privacy deletion
+-- ---------------------------------------------------------------------------------------------
+--
+-- The tenant reference is an opaque internal contract reference, not a provider account id. Audit
+-- rows deliberately carry no tenant or source identifier because they survive tenant erasure.
+
+create table claude_archive.privacy_deletion_requests (
+    request_id        uuid        primary key,
+    tenant_ref        text        not null,
+    request_key       text        not null,
+    scope_kind        text        not null,
+    scope_id          uuid,
+    state             text        not null,
+    completion_report jsonb,
+    error_code        text,
+    correlation_id    text        not null,
+    requested_at      timestamptz not null default now(),
+    completed_at      timestamptz,
+    constraint privacy_deletion_scope_kind_check
+        check (scope_kind in ('raw_export', 'conversation', 'tenant')),
+    constraint privacy_deletion_scope_shape check (
+        (scope_kind = 'tenant' and scope_id is null)
+        or (scope_kind in ('raw_export', 'conversation') and scope_id is not null)
+    ),
+    constraint privacy_deletion_state_check
+        check (state in ('planned', 'purging', 'finalizing', 'completed', 'failed')),
+    constraint privacy_deletion_request_identity_unique unique (tenant_ref, request_key)
+);
+
+create table claude_archive.privacy_deletion_items (
+    request_id    uuid    not null references claude_archive.privacy_deletion_requests (request_id) on delete cascade,
+    item_index    integer not null check (item_index >= 0),
+    item_kind     text    not null,
+    subject_id    text    not null,
+    action        text    not null,
+    state         text    not null default 'planned',
+    blob_ref      text,
+    error_code    text,
+    constraint privacy_deletion_items_pkey primary key (request_id, item_index),
+    constraint privacy_deletion_items_kind_check
+        check (item_kind in ('raw_archive', 'extracted_artifact', 'import_run',
+                             'completeness_report', 'unknown_record', 'project',
+                             'project_source', 'conversation', 'message', 'message_relation',
+                             'content_part', 'artifact', 'artifact_version', 'asset',
+                             'external_reference', 'revision', 'analysis_link', 'inbox',
+                             'outbox', 'downstream_tombstone', 'shared_blob')),
+    constraint privacy_deletion_items_action_check
+        check (action in ('erase_blob', 'remove_record', 'retain_shared',
+                          'retain_evidenced', 'emit_tombstone')),
+    constraint privacy_deletion_items_state_check
+        check (state in ('planned', 'purged', 'retained', 'finalized', 'failed')),
+    constraint privacy_deletion_request_item_identity_unique
+        unique (request_id, item_kind, subject_id, action)
+);
+
+create table claude_archive.privacy_deletion_audits (
+    request_id        uuid        primary key references claude_archive.privacy_deletion_requests (request_id),
+    scope_kind        text        not null,
+    category_counts   jsonb       not null,
+    correlation_id    text        not null,
+    outcome           text        not null,
+    evidence_blob_ref text        not null,
+    completed_at      timestamptz not null,
+    constraint privacy_deletion_audits_scope_kind_check
+        check (scope_kind in ('raw_export', 'conversation', 'tenant')),
+    constraint privacy_deletion_audits_counts_object_check
+        check (jsonb_typeof(category_counts) = 'object'),
+    constraint privacy_deletion_audits_outcome_check
+        check (outcome in ('completed', 'failed')),
+    constraint privacy_deletion_audit_request_unique unique (request_id)
+);
+
+comment on table claude_archive.privacy_deletion_audits is
+    'Content-free terminal privacy evidence: opaque operation id, counts, outcome, and audit blob.';
+
+-- ---------------------------------------------------------------------------------------------
+-- reparse and parser-version migration
+-- ---------------------------------------------------------------------------------------------
+
+create table claude_archive.reparse_runs (
+    reparse_run_id        uuid        primary key,
+    tenant_ref            text        not null,
+    export_id             uuid        not null references claude_archive.exports (export_id),
+    parser_name           text        not null,
+    parser_version        text        not null,
+    raw_fingerprint       bytea       not null,
+    registry_fingerprint  bytea       not null,
+    projection_fingerprint bytea      not null,
+    plan_fingerprint      bytea       not null,
+    dry_run               boolean     not null default false,
+    state                 text        not null,
+    report                jsonb       not null,
+    correlation_id        text        not null,
+    started_at            timestamptz not null default now(),
+    completed_at          timestamptz,
+    constraint reparse_runs_applied_only_check check (not dry_run),
+    constraint reparse_runs_state_check check (state in ('applied', 'unchanged', 'failed')),
+    constraint reparse_runs_report_object_check check (jsonb_typeof(report) = 'object'),
+    constraint reparse_execution_identity_unique unique (
+        export_id, parser_name, parser_version, raw_fingerprint,
+        registry_fingerprint, projection_fingerprint
+    )
+);
+
+create table claude_archive.parser_migration_reports (
+    migration_report_id uuid        primary key,
+    tenant_ref          text        not null,
+    operation_key       text        not null,
+    parser_name         text        not null,
+    parser_version      text        not null,
+    plan_fingerprint    bytea       not null,
+    dry_run             boolean     not null default false,
+    state               text        not null,
+    report              jsonb       not null,
+    correlation_id      text        not null,
+    started_at          timestamptz not null default now(),
+    completed_at        timestamptz,
+    constraint parser_migration_reports_state_check
+        check (state in ('planned', 'completed', 'partial', 'failed')),
+    constraint parser_migration_reports_report_object_check check (jsonb_typeof(report) = 'object'),
+    constraint parser_migration_operation_identity_unique unique (tenant_ref, operation_key)
+);
+
+-- ---------------------------------------------------------------------------------------------
 -- outbox_events
 -- ---------------------------------------------------------------------------------------------
 
@@ -556,6 +743,10 @@ create index outbox_events_unpublished_idx
 create unique index outbox_operation_report_once
     on claude_archive.outbox_events (event_type, aggregate_id)
     where event_type = 'platform.operation.reported.v1';
+
+create unique index outbox_privacy_tombstone_once
+    on claude_archive.outbox_events (event_type, aggregate_id, tenant_ref)
+    where event_type = 'ai_archive.subject.tombstoned.v1';
 
 -- Knowledge-derived interpretations remain links, never replacements for archive evidence.
 create table claude_archive.knowledge_analysis_links (

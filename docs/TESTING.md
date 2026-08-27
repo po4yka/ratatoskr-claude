@@ -14,7 +14,9 @@ Required tests:
 - Optional Compliance cursor/redelivery/auth with fakes.
 - Planned workspace Export Agent -> Claude -> Knowledge flow.
 
-No real personal export is committed; sanitized owner fixtures need explicit review.
+No real personal export is committed; sanitized owner fixtures need explicit review. The complete
+owner-only discovery, minimization, review, admission, golden, and source-disposition process is in
+[`testing/OWNER_FIXTURE_DISCOVERY.md`](testing/OWNER_FIXTURE_DISCOVERY.md).
 
 ## Test-first
 
