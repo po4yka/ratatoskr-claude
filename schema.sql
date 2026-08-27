@@ -292,7 +292,8 @@ comment on table claude_archive.content_parts is
 -- artifacts
 -- ---------------------------------------------------------------------------------------------
 --
--- First-class versioned objects. Exactly one owning scope: a conversation OR a project.
+-- First-class versioned objects. An observation may name one project, conversation, or message
+-- owner; a source that supplies none remains explicitly unscoped rather than invented.
 
 create table claude_archive.artifacts (
     artifact_id          uuid        primary key,
@@ -307,7 +308,7 @@ create table claude_archive.artifacts (
     first_seen_at        timestamptz not null default now(),
     last_seen_at         timestamptz not null default now(),
     constraint artifacts_single_scope_check
-        check (num_nonnulls(conversation_id, project_id) = 1),
+        check (num_nonnulls(conversation_id, message_id, project_id) <= 1),
     constraint artifacts_upstream_state_check
         check (upstream_state in ('present', 'missing_from_latest_snapshot', 'explicitly_deleted',
                                   'access_lost', 'unknown'))
@@ -328,18 +329,22 @@ create unique index artifacts_project_external_key
 -- ---------------------------------------------------------------------------------------------
 
 create table claude_archive.artifact_versions (
-    version_id    uuid        primary key,
-    artifact_id   uuid        not null references claude_archive.artifacts (artifact_id),
-    version_index bigint      not null check (version_index >= 0),
-    blob_ref      text,
-    content_hash  bytea,
-    byte_size     bigint,
-    observed_at   timestamptz not null default now(),
-    constraint artifact_versions_artifact_index_key unique (artifact_id, version_index)
+    version_id                   uuid        primary key,
+    artifact_id                  uuid        not null references claude_archive.artifacts (artifact_id),
+    external_version_id          text        not null,
+    previous_external_version_id text,
+    version_index                bigint      not null check (version_index >= 0),
+    blob_ref                     text,
+    content_hash                 bytea,
+    byte_size                    bigint,
+    raw_record                   jsonb,
+    observed_at                  timestamptz not null default now(),
+    constraint artifact_versions_artifact_index_key unique (artifact_id, version_index),
+    constraint artifact_versions_artifact_external_key unique (artifact_id, external_version_id)
 );
 
 comment on table claude_archive.artifact_versions is
-    'Every observed version, not only the latest; absence of content is stated by nulls.';
+    'Every observed version, not only the latest; provider lineage and raw evidence stay explicit.';
 
 -- ---------------------------------------------------------------------------------------------
 -- assets

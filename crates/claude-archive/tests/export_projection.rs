@@ -10,6 +10,8 @@ const UNKNOWN_FIELDS_EXPORT: &str =
     include_str!("fixtures/synthetic_consumer_export_unknown_fields.json");
 const UNKNOWN_CONTENT_EXPORT: &str =
     include_str!("fixtures/synthetic_consumer_export_unknown_content.json");
+const ARTIFACT_V1_EXPORT: &str =
+    include_str!("fixtures/synthetic_consumer_export_artifact_v1.json");
 const GOLDEN_PROJECTION: &str = include_str!("golden/synthetic_consumer_export_projection.json");
 
 #[test]
@@ -49,6 +51,24 @@ fn maps_all_supported_records_and_relationships() {
         [ContentPart::Text { text, .. }, ContentPart::Markdown { markdown, .. }]
             if text == "When should basil be planted?" && markdown == "## Climate\nWarm season"
     ));
+}
+
+#[test]
+fn parses_artifact_records_without_flattening_version_payloads() {
+    let parsed = ConsumerExportParser::parse(ARTIFACT_V1_EXPORT.as_bytes())
+        .expect("the documented Artifact fixture parses");
+    let projection = serde_json::to_value(parsed).expect("the projection serializes");
+
+    assert_eq!(
+        projection["artifacts"].as_array().map(Vec::len),
+        Some(1),
+        "an Artifact must become a first-class normalized record"
+    );
+    assert_eq!(
+        projection["artifacts"][0]["versions"][0]["bytes"],
+        serde_json::json!([35, 32, 71, 97, 114, 100, 101, 110, 10]),
+        "the version payload remains Artifact evidence rather than message text"
+    );
 }
 
 #[test]
@@ -128,12 +148,13 @@ fn declares_exact_consumer_export_parser_capabilities() {
                 ParserCapability::Conversations,
                 ParserCapability::Messages,
                 ParserCapability::ContentParts,
+                ParserCapability::Artifacts,
             ],
         )
         .expect("the projection parser declares every implemented capability");
 
     assert_eq!(selected.identifier(), "claude-synthetic-consumer-export");
-    assert_eq!(selected.version(), "2026-08-26");
+    assert_eq!(selected.version(), "2026-08-27");
 }
 
 #[test]
@@ -233,7 +254,7 @@ fn maps_synthetic_fixture_to_read_only_golden() {
 fn assert_stamp(stamp: &ParserStamp) {
     assert_eq!(stamp.schema_identifier, "claude-export-2026-08-synthetic");
     assert_eq!(stamp.parser_identifier, "claude-synthetic-consumer-export");
-    assert_eq!(stamp.parser_version, "2026-08-26");
+    assert_eq!(stamp.parser_version, "2026-08-27");
 }
 
 fn content_stamp(part: &ContentPart) -> &ParserStamp {

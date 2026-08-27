@@ -8,7 +8,7 @@ use crate::receipt::AcquisitionMode;
 
 const SYNTHETIC_SCHEMA_IDENTIFIER: &str = "claude-export-2026-08-synthetic";
 const PARSER_IDENTIFIER: &str = "claude-synthetic-consumer-export";
-const PARSER_VERSION: &str = "2026-08-26";
+const PARSER_VERSION: &str = "2026-08-27";
 
 /// Parser provenance carried by a normalized record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
@@ -75,6 +75,58 @@ pub struct ProjectKnowledgeFile {
     pub bytes: Option<Vec<u8>>,
     /// JSON Pointer for the source record.
     pub location: String,
+    /// Parser provenance.
+    pub parser: ParserStamp,
+    /// Unrecognized provider fields retained as evidence.
+    pub unknown_fields: Vec<UnknownField>,
+}
+
+/// A first-class Claude Artifact observation.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Artifact {
+    /// Provider Artifact identifier.
+    pub external_id: String,
+    /// Provider-declared Artifact type.
+    pub artifact_type: String,
+    /// Optional provider display title.
+    pub title: Option<String>,
+    /// Optional provider language identifier.
+    pub language: Option<String>,
+    /// Optional provider project relationship.
+    pub project_external_id: Option<String>,
+    /// Optional provider conversation relationship.
+    pub conversation_external_id: Option<String>,
+    /// Optional provider message relationship.
+    pub message_external_id: Option<String>,
+    /// Immutable version evidence in source order.
+    pub versions: Vec<ArtifactVersion>,
+    /// JSON Pointer for the source record.
+    pub location: String,
+    /// Inert original provider Artifact record.
+    pub raw: Value,
+    /// Parser provenance.
+    pub parser: ParserStamp,
+    /// Unrecognized provider fields retained as evidence.
+    pub unknown_fields: Vec<UnknownField>,
+}
+
+/// One immutable version observation of an Artifact.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ArtifactVersion {
+    /// Provider version identifier.
+    pub external_id: String,
+    /// Optional provider identifier for the predecessor version.
+    pub previous_external_id: Option<String>,
+    /// Provider-declared media type of the available payload.
+    pub media_type: String,
+    /// Provider-declared SHA-256 when observed.
+    pub declared_sha256: Option<String>,
+    /// Supplied payload bytes before their separate `BlobStore` ingest classification.
+    pub bytes: Option<Vec<u8>>,
+    /// JSON Pointer for the source record.
+    pub location: String,
+    /// Inert original provider Artifact-version record.
+    pub raw: Value,
     /// Parser provenance.
     pub parser: ParserStamp,
     /// Unrecognized provider fields retained as evidence.
@@ -165,6 +217,8 @@ pub struct ParsedExport {
     pub project_knowledge_files: Vec<ProjectKnowledgeFile>,
     /// Conversation observations in source order.
     pub conversations: Vec<Conversation>,
+    /// Artifact observations in source order.
+    pub artifacts: Vec<Artifact>,
     /// Unrecognized root fields retained as evidence.
     pub unknown_fields: Vec<UnknownField>,
 }
@@ -205,6 +259,7 @@ impl ConsumerExportParser {
                 ParserCapability::Conversations,
                 ParserCapability::Messages,
                 ParserCapability::ContentParts,
+                ParserCapability::Artifacts,
             ],
         )
     }
@@ -243,13 +298,25 @@ impl ConsumerExportParser {
             conversations.push(parse_conversation(conversation, index, &parser)?);
         }
 
+        let mut artifacts = Vec::new();
+        if let Some(records) = optional_array(root, "artifacts", "")? {
+            for (index, artifact) in records.iter().enumerate() {
+                artifacts.push(parse_artifact(artifact, index, &parser)?);
+            }
+        }
+
         Ok(ParsedExport {
             parser,
             projects,
             project_instructions,
             project_knowledge_files,
             conversations,
-            unknown_fields: unknown_fields(root, &["schema", "projects", "conversations"], ""),
+            artifacts,
+            unknown_fields: unknown_fields(
+                root,
+                &["schema", "projects", "conversations", "artifacts"],
+                "",
+            ),
         })
     }
 }
@@ -331,6 +398,80 @@ fn parse_knowledge_file(
         unknown_fields: unknown_fields(
             object,
             &["id", "filename", "media_type", "sha256", "bytes"],
+            &location,
+        ),
+    })
+}
+
+fn parse_artifact(
+    value: &Value,
+    index: usize,
+    parser: &ParserStamp,
+) -> Result<Artifact, ExportParseError> {
+    let location = format!("/artifacts/{index}");
+    let object = object_at(value, &location)?;
+    let mut versions = Vec::new();
+    for (version_index, version) in required_array(object, "versions", &location)?
+        .iter()
+        .enumerate()
+    {
+        versions.push(parse_artifact_version(
+            version,
+            &location,
+            version_index,
+            parser,
+        )?);
+    }
+
+    Ok(Artifact {
+        external_id: required_string(object, "id", &location)?.to_owned(),
+        artifact_type: required_string(object, "type", &location)?.to_owned(),
+        title: optional_string(object, "title", &location)?,
+        language: optional_string(object, "language", &location)?,
+        project_external_id: optional_string(object, "project_id", &location)?,
+        conversation_external_id: optional_string(object, "conversation_id", &location)?,
+        message_external_id: optional_string(object, "message_id", &location)?,
+        versions,
+        location: location.clone(),
+        raw: value.clone(),
+        parser: parser.clone(),
+        unknown_fields: unknown_fields(
+            object,
+            &[
+                "id",
+                "type",
+                "title",
+                "language",
+                "project_id",
+                "conversation_id",
+                "message_id",
+                "versions",
+            ],
+            &location,
+        ),
+    })
+}
+
+fn parse_artifact_version(
+    value: &Value,
+    artifact_location: &str,
+    index: usize,
+    parser: &ParserStamp,
+) -> Result<ArtifactVersion, ExportParseError> {
+    let location = format!("{artifact_location}/versions/{index}");
+    let object = object_at(value, &location)?;
+    Ok(ArtifactVersion {
+        external_id: required_string(object, "id", &location)?.to_owned(),
+        previous_external_id: optional_string(object, "previous_version_id", &location)?,
+        media_type: required_string(object, "media_type", &location)?.to_owned(),
+        declared_sha256: optional_string(object, "sha256", &location)?,
+        bytes: optional_bytes(object, "bytes", &location)?,
+        location: location.clone(),
+        raw: value.clone(),
+        parser: parser.clone(),
+        unknown_fields: unknown_fields(
+            object,
+            &["id", "previous_version_id", "media_type", "sha256", "bytes"],
             &location,
         ),
     })

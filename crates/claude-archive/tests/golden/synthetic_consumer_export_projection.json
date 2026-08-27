@@ -2,7 +2,7 @@
   "parser": {
     "schema_identifier": "claude-export-2026-08-synthetic",
     "parser_identifier": "claude-synthetic-consumer-export",
-    "parser_version": "2026-08-26"
+    "parser_version": "2026-08-27"
   },
   "projects": [
     {
@@ -12,7 +12,7 @@
       "parser": {
         "schema_identifier": "claude-export-2026-08-synthetic",
         "parser_identifier": "claude-synthetic-consumer-export",
-        "parser_version": "2026-08-26"
+        "parser_version": "2026-08-27"
       },
       "unknown_fields": []
     },
@@ -23,7 +23,7 @@
       "parser": {
         "schema_identifier": "claude-export-2026-08-synthetic",
         "parser_identifier": "claude-synthetic-consumer-export",
-        "parser_version": "2026-08-26"
+        "parser_version": "2026-08-27"
       },
       "unknown_fields": []
     }
@@ -35,7 +35,7 @@
       "parser": {
         "schema_identifier": "claude-export-2026-08-synthetic",
         "parser_identifier": "claude-synthetic-consumer-export",
-        "parser_version": "2026-08-26"
+        "parser_version": "2026-08-27"
       }
     }
   ],
@@ -63,7 +63,7 @@
       "parser": {
         "schema_identifier": "claude-export-2026-08-synthetic",
         "parser_identifier": "claude-synthetic-consumer-export",
-        "parser_version": "2026-08-26"
+        "parser_version": "2026-08-27"
       },
       "unknown_fields": []
     },
@@ -78,7 +78,7 @@
       "parser": {
         "schema_identifier": "claude-export-2026-08-synthetic",
         "parser_identifier": "claude-synthetic-consumer-export",
-        "parser_version": "2026-08-26"
+        "parser_version": "2026-08-27"
       },
       "unknown_fields": []
     },
@@ -107,7 +107,7 @@
       "parser": {
         "schema_identifier": "claude-export-2026-08-synthetic",
         "parser_identifier": "claude-synthetic-consumer-export",
-        "parser_version": "2026-08-26"
+        "parser_version": "2026-08-27"
       },
       "unknown_fields": []
     }
@@ -132,7 +132,7 @@
               "parser": {
                 "schema_identifier": "claude-export-2026-08-synthetic",
                 "parser_identifier": "claude-synthetic-consumer-export",
-                "parser_version": "2026-08-26"
+                "parser_version": "2026-08-27"
               },
               "unknown_fields": []
             },
@@ -142,7 +142,7 @@
               "parser": {
                 "schema_identifier": "claude-export-2026-08-synthetic",
                 "parser_identifier": "claude-synthetic-consumer-export",
-                "parser_version": "2026-08-26"
+                "parser_version": "2026-08-27"
               },
               "unknown_fields": []
             }
@@ -150,7 +150,7 @@
           "parser": {
             "schema_identifier": "claude-export-2026-08-synthetic",
             "parser_identifier": "claude-synthetic-consumer-export",
-            "parser_version": "2026-08-26"
+            "parser_version": "2026-08-27"
           },
           "unknown_fields": []
         },
@@ -167,7 +167,7 @@
               "parser": {
                 "schema_identifier": "claude-export-2026-08-synthetic",
                 "parser_identifier": "claude-synthetic-consumer-export",
-                "parser_version": "2026-08-26"
+                "parser_version": "2026-08-27"
               },
               "unknown_fields": []
             }
@@ -175,7 +175,7 @@
           "parser": {
             "schema_identifier": "claude-export-2026-08-synthetic",
             "parser_identifier": "claude-synthetic-consumer-export",
-            "parser_version": "2026-08-26"
+            "parser_version": "2026-08-27"
           },
           "unknown_fields": []
         }
@@ -183,10 +183,11 @@
       "parser": {
         "schema_identifier": "claude-export-2026-08-synthetic",
         "parser_identifier": "claude-synthetic-consumer-export",
-        "parser_version": "2026-08-26"
+        "parser_version": "2026-08-27"
       },
       "unknown_fields": []
     }
   ],
+  "artifacts": [],
   "unknown_fields": []
 }

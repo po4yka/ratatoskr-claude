@@ -52,6 +52,20 @@ async fn table_inventory(pool: &sqlx::PgPool) -> BTreeSet<String> {
         .collect()
 }
 
+async fn column_inventory(pool: &sqlx::PgPool, table: &str) -> BTreeSet<String> {
+    let rows = sqlx::query(
+        "select column_name from information_schema.columns
+         where table_schema = 'claude_archive' and table_name = $1",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .expect("the column catalog query succeeds");
+    rows.into_iter()
+        .map(|row| row.get::<String, _>(0))
+        .collect()
+}
+
 #[tokio::test]
 async fn fresh_database_provisions_every_owned_table() {
     let db = TestDatabase::create()
@@ -84,6 +98,30 @@ async fn second_database_has_same_inventory() {
 
     first.cleanup().await.expect("first cleanup succeeds");
     second.cleanup().await.expect("second cleanup succeeds");
+}
+
+#[tokio::test]
+async fn artifact_versions_retain_provider_lineage_evidence() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a fresh disposable database applies the definition");
+
+    let columns = column_inventory(db.database.pool(), "artifact_versions").await;
+    for expected in [
+        "artifact_id",
+        "external_version_id",
+        "previous_external_version_id",
+        "blob_ref",
+        "content_hash",
+        "raw_record",
+    ] {
+        assert!(
+            columns.contains(expected),
+            "Artifact-version lineage needs the {expected} column"
+        );
+    }
+
+    db.cleanup().await.expect("cleanup succeeds");
 }
 
 #[tokio::test]

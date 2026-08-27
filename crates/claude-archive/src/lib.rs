@@ -10,6 +10,7 @@
 //! publication arrives with a later implementation plan item.
 
 pub mod archive_inspection;
+pub mod artifact;
 pub mod blob_store;
 pub mod completeness;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod database;
 pub mod export_projection;
 pub mod import_state;
 pub mod parser_registry;
+pub mod portable_artifact;
 pub mod project_knowledge;
 pub mod receipt;
 pub mod telemetry;
@@ -26,6 +28,10 @@ pub use archive_inspection::{
     ArchiveInventory, ArchiveLimit, ExtractedArtifact, MediaDisposition, RawArchiveProvenance,
     UnsafeEntryKind,
 };
+pub use artifact::{
+    ArtifactReconciler, ArtifactReconciliationError, ArtifactVersionAnomaly,
+    ArtifactVersionAvailability, ReconciledArtifact, ReconciledArtifactVersion,
+};
 pub use blob_store::{BlobRef, BlobStore, DigestAlgorithm, MediaType, StoreError};
 pub use completeness::{
     ArchiveCompletenessReport, CompletenessCounts, CompletenessStatus, CompletenessWarning,
@@ -34,13 +40,17 @@ pub use completeness::{
 pub use config::{AdminConfig, Config, ConfigError, Limits, StorageConfig, TelemetryConfig};
 pub use database::{Database, PersistenceError};
 pub use export_projection::{
-    ConsumerExportParser, ContentPart, Conversation, ExportParseError, Message, ParsedExport,
-    ParserStamp, Project, ProjectInstruction, ProjectKnowledgeFile, UnknownField,
+    Artifact, ArtifactVersion, ConsumerExportParser, ContentPart, Conversation, ExportParseError,
+    Message, ParsedExport, ParserStamp, Project, ProjectInstruction, ProjectKnowledgeFile,
+    UnknownField,
 };
 pub use import_state::{ImportError, ImportRunStore, ImportState, TransitionOutcome};
 pub use parser_registry::{
     DetectedSchema, ParserCapability, ParserDescriptor, ParserRegistry, ParserRegistryError,
     ParserSelectionError,
+};
+pub use portable_artifact::{
+    ArtifactPortableError, ArtifactPortableExporter, PortableArtifactRepresentation,
 };
 pub use project_knowledge::{
     KnowledgeFileAnomaly, KnowledgeFileAvailability, ProjectKnowledgeIngestResult,

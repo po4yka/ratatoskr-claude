@@ -1,0 +1,26 @@
+{
+  "schema": "claude-export-2026-08-synthetic",
+  "projects": [
+    {
+      "id": "project-garden",
+      "name": "Garden plans"
+    }
+  ],
+  "conversations": [],
+  "artifacts": [
+    {
+      "id": "artifact-garden-plan",
+      "type": "text/markdown",
+      "title": "Garden plan",
+      "project_id": "project-garden",
+      "versions": [
+        {
+          "id": "artifact-garden-plan-v1",
+          "media_type": "text/markdown",
+          "sha256": "04e8d1a2038648c55e814e55637df9468bc304abfa046ff461ed511a7f4773cf",
+          "bytes": [35, 32, 71, 97, 114, 100, 101, 110, 10]
+        }
+      ]
+    }
+  ]
+}

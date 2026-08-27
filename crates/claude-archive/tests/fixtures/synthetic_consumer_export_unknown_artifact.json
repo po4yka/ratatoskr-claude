@@ -1,0 +1,19 @@
+{
+  "schema": "claude-export-2026-08-synthetic",
+  "projects": [],
+  "conversations": [],
+  "artifacts": [
+    {
+      "id": "artifact-provider-canvas",
+      "type": "provider/canvas",
+      "versions": [
+        {
+          "id": "artifact-provider-canvas-v1",
+          "media_type": "text/plain",
+          "sha256": "185f8db32271fe25f561a6fc938b2e264306ec304eda518007d1764826381969",
+          "bytes": [72, 101, 108, 108, 111]
+        }
+      ]
+    }
+  ]
+}

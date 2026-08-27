@@ -49,6 +49,8 @@ pub enum ParserCapability {
     Messages,
     /// Produces typed message content parts.
     ContentParts,
+    /// Produces first-class Artifact and Artifact-version records.
+    Artifacts,
 }
 
 /// A versioned parser declaration without parser implementation behavior.
