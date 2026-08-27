@@ -529,21 +529,25 @@ create table claude_archive.outbox_events (
     event_id        uuid        primary key,
     event_type      text        not null,
     aggregate_type  text        not null,
-    aggregate_id    uuid        not null,
-    payload         jsonb       not null,
-    correlation_id  uuid,
-    causation_id    uuid,
+    aggregate_id    text        not null,
+    envelope        jsonb       not null,
+    payload_digest  bytea       not null,
+    correlation_id  text        not null,
+    causation_id    text,
+    tenant_ref      text,
     occurred_at     timestamptz not null,
     published_at    timestamptz,
     attempt_count   integer     not null default 0,
     next_attempt_at timestamptz,
     constraint outbox_events_aggregate_type_check
         check (aggregate_type in ('operation', 'export', 'import_run', 'project', 'conversation', 'message',
-                                  'artifact', 'asset'))
+                                  'artifact', 'asset', 'archive', 'tombstone')),
+    constraint outbox_events_envelope_object_check check (jsonb_typeof(envelope) = 'object'),
+    constraint outbox_events_event_payload_key unique (event_type, payload_digest)
 );
 
 comment on table claude_archive.outbox_events is
-    'Transactional outbox. Rows become at-least-once publications; replay converges.';
+    'Transactional outbox storing the complete published EventEnvelope. Rows become at-least-once publications; replay converges without rebuilding private payloads.';
 
 create index outbox_events_unpublished_idx
     on claude_archive.outbox_events (next_attempt_at)
@@ -552,6 +556,26 @@ create index outbox_events_unpublished_idx
 create unique index outbox_operation_report_once
     on claude_archive.outbox_events (event_type, aggregate_id)
     where event_type = 'platform.operation.reported.v1';
+
+-- Knowledge-derived interpretations remain links, never replacements for archive evidence.
+create table claude_archive.knowledge_analysis_links (
+    completion_event_id uuid primary key,
+    ai_archive_id uuid not null,
+    subject_kind text not null,
+    subject_id text not null,
+    content_digest_hex text not null,
+    completed_at timestamptz not null,
+    constraint knowledge_analysis_links_subject_check
+        check (subject_kind in ('conversation', 'artifact')),
+    constraint knowledge_analysis_links_digest_check
+        check (content_digest_hex ~ '^[0-9a-f]{64}$'),
+    constraint knowledge_analysis_links_revision_key unique (
+        ai_archive_id, subject_kind, subject_id, content_digest_hex
+    )
+);
+
+comment on table claude_archive.knowledge_analysis_links is
+    'Validated Knowledge completion links. Every row names one already-published immutable archive revision.';
 
 -- ---------------------------------------------------------------------------------------------
 -- inbox_events

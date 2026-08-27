@@ -6,8 +6,8 @@
 //! The foundation owns process configuration, structured telemetry, the
 //! content-addressed blob store, and application of the first-version
 //! `claude_archive` schema. Export receipt, conservative parsing, Project
-//! Knowledge evidence, and completeness reporting are implemented; event
-//! publication arrives with a later implementation plan item.
+//! Knowledge evidence, completeness reporting, contract-native outbox publication,
+//! and revision-specific Knowledge analysis linkage are implemented.
 
 pub mod archive_inspection;
 pub mod artifact;
@@ -15,9 +15,11 @@ pub mod blob_store;
 pub mod completeness;
 pub mod config;
 pub mod database;
+pub mod events;
 pub mod export_projection;
 pub mod external_reference;
 pub mod import_state;
+pub mod knowledge_link;
 pub mod operation_outbox;
 pub mod parser_registry;
 pub mod portable_artifact;
@@ -43,6 +45,7 @@ pub use config::{
     AdminConfig, Config, ConfigError, Limits, ReceiptConfig, StorageConfig, TelemetryConfig,
 };
 pub use database::{Database, PersistenceError};
+pub use events::{ArchiveEventError, ArchiveEventFact, ArchiveOutbox, OutboxEvent};
 pub use export_projection::{
     Artifact, ArtifactVersion, ConsumerExportParser, ContentPart, Conversation, ExportParseError,
     Message, ParsedExport, ParserStamp, Project, ProjectInstruction, ProjectKnowledgeFile,
@@ -53,6 +56,7 @@ pub use external_reference::{
     ExternalReferenceKind, LocalBackupStatus, LocalEvidence, derive_local_backup_status,
 };
 pub use import_state::{ImportError, ImportRunStore, ImportState, TransitionOutcome};
+pub use knowledge_link::{KnowledgeLinkError, KnowledgeLinkOutcome, KnowledgeLinkStore};
 pub use operation_outbox::OperationReportOutbox;
 pub use parser_registry::{
     DetectedSchema, ParserCapability, ParserDescriptor, ParserRegistry, ParserRegistryError,

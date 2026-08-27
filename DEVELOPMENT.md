@@ -12,6 +12,11 @@ digest or media-type anomalies remain inert quarantined evidence. Per-archive an
 reports count verified, missing, quarantined, and unknown evidence in deterministic order;
 reference-only files remain explicitly unbacked up, and absence never proves deletion or coverage.
 
+Plan item 8 publishes immutable import, project, conversation, Artifact, and explicit tombstone
+facts through the Claude-owned transactional outbox using the pinned AI-archive contract. Every
+subject event carries its raw-export provenance; Knowledge completion envelopes are admitted only
+when their owner, subject, archive, and content digest match a previously published revision.
+
 ## Toolchain
 
 Rust 1.97.0 (pinned in `rust-toolchain.toml`), Tokio, axum, SQLx/PostgreSQL without the migrate feature, tracing with JSON logs to stderr plus Prometheus metrics, and a local content-addressed BlobStore. The database schema is one file (`schema.sql`) applied under an advisory lock; there are no migrations while the development status holds.

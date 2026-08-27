@@ -1625,6 +1625,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "ratatoskr-ai-archive-contracts",
  "ratatoskr-claude-archive",
+ "ratatoskr-event-envelope",
  "ratatoskr-identifiers",
  "ratatoskr-operation-contracts",
  "secrecy",

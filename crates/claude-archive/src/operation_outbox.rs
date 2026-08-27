@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use ratatoskr_event_envelope::EventEnvelope;
 use sqlx::Row as _;
 
 /// The Platform-owned event topic for producer progress facts.
@@ -37,7 +38,7 @@ impl OperationReportOutbox {
             .map_err(OutboxError::broker)?;
         let jetstream = async_nats::jetstream::new(client);
         let rows = sqlx::query(
-            "select event_id, payload from claude_archive.outbox_events
+            "select event_id, envelope from claude_archive.outbox_events
              where event_type = 'platform.operation.reported.v1' and published_at is null
              order by occurred_at, event_id limit $1",
         )
@@ -49,9 +50,10 @@ impl OperationReportOutbox {
         let mut published = 0;
         for row in rows {
             let event_id: uuid::Uuid = row.try_get("event_id").map_err(OutboxError::Database)?;
-            let payload: serde_json::Value =
-                row.try_get("payload").map_err(OutboxError::Database)?;
-            let body = serde_json::to_vec(&payload).map_err(OutboxError::Encode)?;
+            let envelope: EventEnvelope =
+                serde_json::from_value(row.try_get("envelope").map_err(OutboxError::Database)?)
+                    .map_err(OutboxError::Encode)?;
+            let body = serde_json::to_vec(&envelope.payload).map_err(OutboxError::Encode)?;
             let mut headers = async_nats::HeaderMap::new();
             headers.insert("Nats-Msg-Id", event_id.to_string());
             let acknowledgement = jetstream

@@ -18,7 +18,7 @@ use uuid::Uuid;
 use ratatoskr_claude_archive::test_support::TestDatabase;
 
 /// The tables the service owns, from the AGENTS.md conceptual data list.
-const OWNED_TABLES: [&str; 20] = [
+const OWNED_TABLES: [&str; 21] = [
     "accounts",
     "organizations",
     "exports",
@@ -38,6 +38,7 @@ const OWNED_TABLES: [&str; 20] = [
     "tombstones",
     "completeness_reports",
     "outbox_events",
+    "knowledge_analysis_links",
     "inbox_events",
 ];
 

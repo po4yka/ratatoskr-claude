@@ -13,10 +13,14 @@ use uuid::Uuid;
 use ratatoskr_ai_archive_contracts::{
     AiArchiveCompleteness, AiArchiveOperationSummary, AiProvider,
 };
-use ratatoskr_identifiers::{AiArchiveId, EntityRef, Extensions, OperationId};
+use ratatoskr_event_envelope::{EventEnvelope, EventPayload};
+use ratatoskr_identifiers::{
+    AiArchiveId, EntityRef, EventId, Extensions, OperationId, WireTimestamp,
+};
 use ratatoskr_operation_contracts::{
     OperationReported, OperationResultKind, OperationResultRef, OperationStatus,
 };
+use sha2::{Digest as _, Sha256};
 
 use crate::blob_store::{BlobRef, BlobStore, MediaType, StoreError};
 use crate::database::Database;
@@ -103,6 +107,9 @@ pub enum ReceiptError {
     /// A typed Platform operation report could not be encoded.
     #[error("the terminal operation report could not be encoded")]
     ReportEncoding(#[from] serde_json::Error),
+    /// A terminal operation report could not be placed in its full event envelope.
+    #[error("the terminal operation report could not be enveloped")]
+    ReportEnvelope(#[source] ratatoskr_event_envelope::EnvelopeError),
     /// The published operation-contract vocabulary rejected a fixed value.
     #[error("the terminal operation report could not satisfy its contract")]
     ReportContract,
@@ -364,14 +371,23 @@ async fn record_stored_archive(
 
     if let Some(operation) = platform_operation {
         let report = raw_stored_partial(operation, ai_archive_id)?;
+        let envelope = operation_report_envelope(&report)?;
+        let payload_digest = Sha256::digest(
+            serde_json::to_vec(&envelope.payload).map_err(ReceiptError::ReportEncoding)?,
+        );
         sqlx::query(
             "insert into claude_archive.outbox_events
-                 (event_id, event_type, aggregate_type, aggregate_id, payload, occurred_at)
-             values ($1, 'platform.operation.reported.v1', 'operation', $2, $3, now())",
+                 (event_id, event_type, aggregate_type, aggregate_id, envelope, payload_digest,
+                  correlation_id, occurred_at)
+             values ($1, $2, 'operation', $3, $4, $5, $6, $7::timestamptz)",
         )
-        .bind(Uuid::now_v7())
-        .bind(operation.operation_id)
-        .bind(report)
+        .bind(envelope.event_id.0)
+        .bind(envelope.event_type.to_wire())
+        .bind(operation.operation_id.to_string())
+        .bind(serde_json::to_value(&envelope).map_err(ReceiptError::ReportEncoding)?)
+        .bind(payload_digest.as_slice())
+        .bind(envelope.correlation_id.to_string())
+        .bind(envelope.occurred_at.to_string())
         .execute(&mut *transaction)
         .await
         .map_err(ReceiptError::Query)?;
@@ -390,7 +406,7 @@ async fn record_stored_archive(
 fn raw_stored_partial(
     operation: PlatformOperation,
     ai_archive_id: Uuid,
-) -> Result<serde_json::Value, ReceiptError> {
+) -> Result<OperationReported, ReceiptError> {
     let archive =
         AiArchiveId::parse(&ai_archive_id.to_string()).map_err(|_| ReceiptError::ReportContract)?;
     let operation_id = OperationId::parse(&operation.operation_id.to_string())
@@ -423,7 +439,27 @@ fn raw_stored_partial(
         warnings: Vec::new(),
         extensions: Extensions::new(),
     };
-    serde_json::to_value(report).map_err(ReceiptError::ReportEncoding)
+    Ok(report)
+}
+
+fn operation_report_envelope(report: &OperationReported) -> Result<EventEnvelope, ReceiptError> {
+    let event_id = EventId::new_v7();
+    let aggregate_id = EntityRef::from(report.operation_id);
+    let mut envelope: EventEnvelope = serde_json::from_value(serde_json::json!({
+        "event_id": event_id,
+        "event_type": OperationReported::EVENT_TYPE,
+        "occurred_at": WireTimestamp::now(),
+        "producer": "ratatoskr-claude",
+        "aggregate_id": aggregate_id,
+        "correlation_id": event_id.as_entity_ref(),
+        "schema_version": 1,
+        "payload": {}
+    }))
+    .map_err(ReceiptError::ReportEncoding)?;
+    envelope
+        .set_payload(report)
+        .map_err(ReceiptError::ReportEnvelope)?;
+    Ok(envelope)
 }
 
 /// Verifies a claim against the tenants this archive knows.

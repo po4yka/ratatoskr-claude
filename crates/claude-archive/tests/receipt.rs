@@ -19,6 +19,7 @@ use ratatoskr_claude_archive::{
     AcquisitionMode, ArchiveIdentity, BlobStore, ImportRunStore, OperationReportOutbox,
     PlatformOperation, ReceiptError, ReceiptOutcome, TenantClaim,
 };
+use ratatoskr_event_envelope::EventEnvelope;
 use sqlx::Row as _;
 use uuid::Uuid;
 
@@ -525,10 +526,10 @@ async fn platform_archive_receipt_records_one_unknown_partial_terminal_report() 
     .expect("a verified Platform archive is stored");
 
     let reports = sqlx::query(
-        "select payload from claude_archive.outbox_events
+        "select envelope from claude_archive.outbox_events
          where event_type = 'platform.operation.reported.v1' and aggregate_id = $1",
     )
-    .bind(operation_id)
+    .bind(operation_id.to_string())
     .fetch_all(db.database.pool())
     .await
     .expect("the outbox query succeeds");
@@ -537,7 +538,9 @@ async fn platform_archive_receipt_records_one_unknown_partial_terminal_report() 
         1,
         "one stored Platform operation produces one durable terminal report"
     );
-    let payload: serde_json::Value = reports[0].get("payload");
+    let envelope: EventEnvelope = serde_json::from_value(reports[0].get("envelope"))
+        .expect("the operation report envelope is valid");
+    let payload = serde_json::Value::Object(envelope.payload);
     assert_eq!(payload["status"], "partially_succeeded");
     assert_eq!(
         payload["results"][0]["ai_archive_import_summary"]["provider"],
@@ -564,11 +567,14 @@ async fn failed_operation_report_publication_leaves_the_outbox_row_pending() {
     let event_id = Uuid::now_v7();
     sqlx::query(
         "insert into claude_archive.outbox_events
-             (event_id, event_type, aggregate_type, aggregate_id, payload, occurred_at)
-         values ($1, 'platform.operation.reported.v1', 'operation', $2, '{}'::jsonb, now())",
+             (event_id, event_type, aggregate_type, aggregate_id, envelope, payload_digest,
+              correlation_id, occurred_at)
+         values ($1, 'platform.operation.reported.v1', 'operation', $2, '{}'::jsonb,
+                 decode(repeat('00', 32), 'hex'), $3, now())",
     )
     .bind(event_id)
-    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7().to_string())
+    .bind(format!("event:{event_id}"))
     .execute(db.database.pool())
     .await
     .expect("the pending report inserts");

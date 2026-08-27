@@ -40,6 +40,7 @@ zip       = { version = "=8.6.0", default-features = false, features = ["deflate
 ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
 ratatoskr-ai-archive-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
 ratatoskr-operation-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
+ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
 
 [workspace.lints.rust]
 unsafe_code                   = "forbid"
