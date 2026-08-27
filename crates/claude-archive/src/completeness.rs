@@ -1,7 +1,7 @@
 //! Conservative completeness summaries for normalized archive evidence.
 
 use crate::{
-    ContentPart, KnowledgeFileAnomaly, KnowledgeFileAvailability, ParsedExport,
+    ContentPart, KnowledgeFileAnomaly, KnowledgeFileAvailability, LocalBackupStatus, ParsedExport,
     ProjectKnowledgeIngestResult,
 };
 
@@ -43,6 +43,29 @@ pub struct CompletenessCounts {
     pub messages: u64,
     /// Retained unknown provider variants.
     pub unknown_variants: u64,
+    /// Entities with verified local preservation evidence.
+    pub locally_backed_up_entities: u64,
+    /// Entities known upstream without verified local preservation evidence.
+    pub reference_only_entities: u64,
+}
+
+impl CompletenessCounts {
+    /// Counts independently derived local backup statuses for report surfaces.
+    #[must_use]
+    pub fn from_backup_statuses(statuses: impl IntoIterator<Item = LocalBackupStatus>) -> Self {
+        let mut counts = Self::default();
+        for status in statuses {
+            match status {
+                LocalBackupStatus::LocallyBackedUp => {
+                    counts.locally_backed_up_entities += 1;
+                }
+                LocalBackupStatus::ReferenceOnly => {
+                    counts.reference_only_entities += 1;
+                }
+            }
+        }
+        counts
+    }
 }
 
 /// One content-free warning emitted by completeness calculation.
@@ -258,6 +281,12 @@ fn add_counts(total: &mut CompletenessCounts, addition: &CompletenessCounts) {
     total.unknown_variants = total
         .unknown_variants
         .saturating_add(addition.unknown_variants);
+    total.locally_backed_up_entities = total
+        .locally_backed_up_entities
+        .saturating_add(addition.locally_backed_up_entities);
+    total.reference_only_entities = total
+        .reference_only_entities
+        .saturating_add(addition.reference_only_entities);
 }
 
 fn most_conservative(left: CompletenessStatus, right: CompletenessStatus) -> CompletenessStatus {

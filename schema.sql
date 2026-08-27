@@ -139,18 +139,23 @@ create table claude_archive.projects (
     title                 text,
     instructions_blob_ref text,
     upstream_state        text        not null,
+    local_backup_status   text        not null default 'reference_only',
     created_at            timestamptz not null default now(),
     updated_at            timestamptz not null default now(),
     constraint projects_account_external_key unique (account_id, external_project_id),
     constraint projects_upstream_state_check
         check (upstream_state in ('present', 'missing_from_latest_snapshot', 'explicitly_deleted',
-                                  'access_lost', 'unknown'))
+                                  'access_lost', 'unknown')),
+    constraint projects_local_backup_status_check
+        check (local_backup_status in ('reference_only', 'locally_backed_up'))
 );
 
 comment on table claude_archive.projects is
     'Discovered projects. Upstream state stays conservative: absence is never deletion.';
 comment on column claude_archive.projects.instructions_blob_ref is
     'BlobStore reference of the project instructions when the source proved them, else null.';
+comment on column claude_archive.projects.local_backup_status is
+    'Evidence-derived local preservation result, independent of authorization or connectivity.';
 
 create index projects_account_idx on claude_archive.projects (account_id);
 
@@ -197,17 +202,22 @@ create table claude_archive.conversations (
     external_conversation_id text        not null,
     title                    text,
     upstream_state           text        not null,
+    local_backup_status      text        not null default 'reference_only',
     provider_created_at      timestamptz,
     first_seen_at            timestamptz not null default now(),
     last_seen_at             timestamptz not null default now(),
     constraint conversations_account_external_key unique (account_id, external_conversation_id),
     constraint conversations_upstream_state_check
         check (upstream_state in ('present', 'missing_from_latest_snapshot', 'explicitly_deleted',
-                                  'access_lost', 'unknown'))
+                                  'access_lost', 'unknown')),
+    constraint conversations_local_backup_status_check
+        check (local_backup_status in ('reference_only', 'locally_backed_up'))
 );
 
 comment on table claude_archive.conversations is
     'Conversation roots scoped to their account so provider ids stay distinct across accounts.';
+comment on column claude_archive.conversations.local_backup_status is
+    'Evidence-derived local preservation result, independent of authorization or connectivity.';
 
 create index conversations_account_idx on claude_archive.conversations (account_id);
 
@@ -305,17 +315,22 @@ create table claude_archive.artifacts (
     language             text,
     title                text,
     upstream_state       text        not null,
+    local_backup_status  text        not null default 'reference_only',
     first_seen_at        timestamptz not null default now(),
     last_seen_at         timestamptz not null default now(),
     constraint artifacts_single_scope_check
         check (num_nonnulls(conversation_id, message_id, project_id) <= 1),
     constraint artifacts_upstream_state_check
         check (upstream_state in ('present', 'missing_from_latest_snapshot', 'explicitly_deleted',
-                                  'access_lost', 'unknown'))
+                                  'access_lost', 'unknown')),
+    constraint artifacts_local_backup_status_check
+        check (local_backup_status in ('reference_only', 'locally_backed_up'))
 );
 
 comment on table claude_archive.artifacts is
     'Artifact identity separate from assistant text; versions carry the contents.';
+comment on column claude_archive.artifacts.local_backup_status is
+    'Evidence-derived local preservation result, independent of authorization or connectivity.';
 
 create unique index artifacts_conversation_external_key
     on claude_archive.artifacts (conversation_id, external_artifact_id)
@@ -345,6 +360,57 @@ create table claude_archive.artifact_versions (
 
 comment on table claude_archive.artifact_versions is
     'Every observed version, not only the latest; provider lineage and raw evidence stay explicit.';
+
+-- ---------------------------------------------------------------------------------------------
+-- external_references and backup_status_audits
+-- ---------------------------------------------------------------------------------------------
+--
+-- A provider reference is not local preservation evidence. The root entity carries the current
+-- derived status while this table keeps its opaque upstream reference separate from dashboard
+-- surfaces. Audit rows name only stable identifiers and classifications, never private content.
+
+create table claude_archive.external_references (
+    reference_id     uuid        primary key,
+    project_id       uuid        references claude_archive.projects (project_id),
+    conversation_id  uuid        references claude_archive.conversations (conversation_id),
+    artifact_id      uuid        references claude_archive.artifacts (artifact_id),
+    provider_reference text,
+    first_seen_at    timestamptz not null default now(),
+    last_seen_at     timestamptz not null default now(),
+    constraint external_references_subject_check
+        check (num_nonnulls(project_id, conversation_id, artifact_id) = 1)
+);
+
+comment on table claude_archive.external_references is
+    'Upstream Claude references kept distinct from verified local preservation evidence.';
+comment on column claude_archive.external_references.provider_reference is
+    'Opaque provider reference; not a local backup claim and never a normal log field.';
+
+create unique index external_references_project_key
+    on claude_archive.external_references (project_id) where project_id is not null;
+create unique index external_references_conversation_key
+    on claude_archive.external_references (conversation_id) where conversation_id is not null;
+create unique index external_references_artifact_key
+    on claude_archive.external_references (artifact_id) where artifact_id is not null;
+
+create table claude_archive.backup_status_audits (
+    audit_id            uuid        primary key,
+    reference_id         uuid        not null references claude_archive.external_references (reference_id),
+    external_entity_id  text        not null,
+    previous_status     text        not null,
+    new_status          text        not null,
+    evidence_kind       text        not null,
+    observed_at         timestamptz not null,
+    constraint backup_status_audits_previous_status_check
+        check (previous_status in ('reference_only', 'locally_backed_up')),
+    constraint backup_status_audits_new_status_check
+        check (new_status in ('reference_only', 'locally_backed_up')),
+    constraint backup_status_audits_evidence_kind_check
+        check (evidence_kind in ('missing', 'verified', 'quarantined'))
+);
+
+comment on table claude_archive.backup_status_audits is
+    'Append-only content-free transitions of evidence-derived local backup status.';
 
 -- ---------------------------------------------------------------------------------------------
 -- assets

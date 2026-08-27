@@ -18,7 +18,7 @@ use uuid::Uuid;
 use ratatoskr_claude_archive::test_support::TestDatabase;
 
 /// The tables the service owns, from the AGENTS.md conceptual data list.
-const OWNED_TABLES: [&str; 18] = [
+const OWNED_TABLES: [&str; 20] = [
     "accounts",
     "organizations",
     "exports",
@@ -31,6 +31,8 @@ const OWNED_TABLES: [&str; 18] = [
     "content_parts",
     "artifacts",
     "artifact_versions",
+    "external_references",
+    "backup_status_audits",
     "assets",
     "revisions",
     "tombstones",
@@ -118,6 +120,45 @@ async fn artifact_versions_retain_provider_lineage_evidence() {
         assert!(
             columns.contains(expected),
             "Artifact-version lineage needs the {expected} column"
+        );
+    }
+
+    db.cleanup().await.expect("cleanup succeeds");
+}
+
+#[tokio::test]
+async fn fresh_schema_exposes_backup_status_and_transition_audits() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a fresh disposable database applies the definition");
+    let pool = db.database.pool();
+    let inventory = table_inventory(pool).await;
+
+    for table in ["external_references", "backup_status_audits"] {
+        assert!(
+            inventory.contains(table),
+            "backup status requires the {table} table"
+        );
+    }
+    for table in ["projects", "conversations", "artifacts"] {
+        let columns = column_inventory(pool, table).await;
+        assert!(
+            columns.contains("local_backup_status"),
+            "{table} must expose its evidence-derived local backup status"
+        );
+    }
+    let audit_columns = column_inventory(pool, "backup_status_audits").await;
+    for column in [
+        "reference_id",
+        "external_entity_id",
+        "previous_status",
+        "new_status",
+        "evidence_kind",
+        "observed_at",
+    ] {
+        assert!(
+            audit_columns.contains(column),
+            "backup-status audit requires the {column} column"
         );
     }
 

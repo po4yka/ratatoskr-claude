@@ -16,6 +16,7 @@ pub mod completeness;
 pub mod config;
 pub mod database;
 pub mod export_projection;
+pub mod external_reference;
 pub mod import_state;
 pub mod parser_registry;
 pub mod portable_artifact;
@@ -43,6 +44,10 @@ pub use export_projection::{
     Artifact, ArtifactVersion, ConsumerExportParser, ContentPart, Conversation, ExportParseError,
     Message, ParsedExport, ParserStamp, Project, ProjectInstruction, ProjectKnowledgeFile,
     UnknownField,
+};
+pub use external_reference::{
+    AuthorizationStatus, BackupStatusAudit, BackupStatusLedger, ExternalReference,
+    ExternalReferenceKind, LocalBackupStatus, LocalEvidence, derive_local_backup_status,
 };
 pub use import_state::{ImportError, ImportRunStore, ImportState, TransitionOutcome};
 pub use parser_registry::{

@@ -2,8 +2,9 @@
 
 use ratatoskr_claude_archive::blob_store::scratch::{remove, temp_root};
 use ratatoskr_claude_archive::{
-    ArchiveCompletenessReport, BlobStore, CompletenessStatus, ConsumerExportParser,
-    CumulativeCompletenessReport, ProjectKnowledgeIngestor,
+    ArchiveCompletenessReport, AuthorizationStatus, BackupStatusLedger, BlobStore,
+    CompletenessCounts, CompletenessStatus, ConsumerExportParser, CumulativeCompletenessReport,
+    ExternalReference, ExternalReferenceKind, LocalEvidence, ProjectKnowledgeIngestor,
 };
 
 const SYNTHETIC_EXPORT: &str = include_str!("fixtures/synthetic_consumer_export.json");
@@ -55,4 +56,28 @@ fn reports_fixture_counts_gaps_and_cumulative_math() {
     assert_eq!(cumulative.status, CompletenessStatus::AssetsPartial);
     assert_eq!(cumulative.warnings.len(), 4);
     remove(&root);
+}
+
+#[test]
+fn backup_status_counts_ignore_expired_authorization() {
+    let backed_up = ExternalReference::new(ExternalReferenceKind::Conversation, "conversation-1");
+    let reference_only =
+        ExternalReference::new(ExternalReferenceKind::Conversation, "conversation-2");
+    let mut ledger = BackupStatusLedger::default();
+
+    let _ = ledger.observe_evidence(&backed_up, LocalEvidence::Verified);
+    let _ = ledger.observe_evidence(&reference_only, LocalEvidence::Missing);
+    let _ = ledger.observe_authorization(&backed_up, AuthorizationStatus::Expired);
+    let statuses = [
+        ledger
+            .status(&backed_up)
+            .expect("verified evidence records a status"),
+        ledger
+            .status(&reference_only)
+            .expect("missing evidence records a status"),
+    ];
+
+    let counts = CompletenessCounts::from_backup_statuses(statuses);
+    assert_eq!(counts.locally_backed_up_entities, 1);
+    assert_eq!(counts.reference_only_entities, 1);
 }
