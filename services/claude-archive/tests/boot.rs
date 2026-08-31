@@ -17,7 +17,14 @@ use std::time::{Duration, Instant};
 use ratatoskr_claude_archive::blob_store::scratch;
 
 const BIN: &str = env!("CARGO_BIN_EXE_ratatoskr-claude-archive");
-const TEST_DATABASE_URL: &str = "postgres://claude:claude@127.0.0.1:5438/claude";
+fn test_database_url() -> String {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the integration-test harness reads its runner-provided database URL"
+    )]
+    std::env::var("CLAUDE_ARCHIVE_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://claude:claude@127.0.0.1:5438/claude".to_owned())
+}
 
 /// A distinct loopback port per test run: derived from the pid so parallel
 /// binaries never collide, well above the ephemeral-reservation zone used by
@@ -38,7 +45,7 @@ fn valid_environment(listen_address: String, blob_root: &std::path::Path) -> Vec
         ),
         (
             "RATATOSKR__STORAGE__DATABASE_URL".to_owned(),
-            TEST_DATABASE_URL.to_owned(),
+            test_database_url(),
         ),
     ]
 }

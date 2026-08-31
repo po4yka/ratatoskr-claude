@@ -14,8 +14,7 @@ use ratatoskr_claude_archive::privacy_deletion::{
     RawExportDeletionPlanRequest, ResolvedDeletionBlob, TenantDeletionPlanRequest,
 };
 use ratatoskr_claude_archive::{
-    BlobRef, BlobStore, Config, ConsumerExportParser, Database, DigestAlgorithm, MediaType,
-    ParserExecutionError, ParserExecutionInput, ParserExecutor, ParserIdentity,
+    BlobRef, BlobStore, Config, Database, DigestAlgorithm, MediaType, ParserIdentity,
     ParserMigrationEntry, ParserMigrationEntryStatus, ParserMigrationPlan, ParserMigrationReport,
     ParserRegistry, ReparseChangeKind, ReparseEngine,
 };
@@ -86,13 +85,8 @@ impl OperatorContext {
             .await
             .map_err(|_| "schema_unavailable".to_owned())?;
         let blobs = BlobStore::open(blob_root).map_err(|_| "blob_store_unavailable".to_owned())?;
-        let mut registry = ParserRegistry::default();
-        registry
-            .register_compiled(
-                ConsumerExportParser::descriptor(),
-                Arc::new(ConsumerParserAdapter),
-            )
-            .map_err(|_| "parser_registry_invalid".to_owned())?;
+        let registry =
+            ParserRegistry::runtime().map_err(|_| "parser_registry_invalid".to_owned())?;
         Ok(Self {
             database,
             blobs,
@@ -347,17 +341,6 @@ impl OperatorContext {
         command: &PortableExportCommand,
     ) -> Result<PortableArchiveState, String> {
         load_portable_state(self.database.pool(), command).await
-    }
-}
-
-#[derive(Debug)]
-struct ConsumerParserAdapter;
-impl ParserExecutor for ConsumerParserAdapter {
-    fn execute(
-        &self,
-        input: ParserExecutionInput<'_>,
-    ) -> Result<ratatoskr_claude_archive::ParsedExport, ParserExecutionError> {
-        ConsumerExportParser::parse(input.evidence).map_err(|_| ParserExecutionError::Failed)
     }
 }
 

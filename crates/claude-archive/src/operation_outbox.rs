@@ -6,7 +6,7 @@ use ratatoskr_event_envelope::EventEnvelope;
 use sqlx::Row as _;
 
 /// The Platform-owned event topic for producer progress facts.
-const OPERATION_REPORTED_SUBJECT: &str = "evt.platform.operation.reported.v1";
+const OPERATION_REPORTED_SUBJECT: &str = "evt.ai-archive.claude.operation.reported.v1";
 /// One pass never monopolises the broker or database queue.
 const BATCH_SIZE: i64 = 32;
 /// A background retry must not wait forever for an unavailable broker.
@@ -31,8 +31,16 @@ impl OperationReportOutbox {
     ///
     /// Returns [`OutboxError`] when the broker cannot connect or acknowledge
     /// a report, or when the durable queue cannot be read or marked.
-    pub async fn publish_pending_once(&self, endpoint: &str) -> Result<usize, OutboxError> {
-        let client = tokio::time::timeout(CONNECT_TIMEOUT, async_nats::connect(endpoint))
+    pub async fn publish_pending_once(
+        &self,
+        endpoint: &str,
+        nkey_seed_path: &std::path::Path,
+    ) -> Result<usize, OutboxError> {
+        let seed = tokio::fs::read_to_string(nkey_seed_path)
+            .await
+            .map_err(OutboxError::broker)?;
+        let options = async_nats::ConnectOptions::with_nkey(seed.trim().to_owned());
+        let client = tokio::time::timeout(CONNECT_TIMEOUT, options.connect(endpoint))
             .await
             .map_err(|_| OutboxError::BrokerTimeout)?
             .map_err(OutboxError::broker)?;
@@ -53,7 +61,7 @@ impl OperationReportOutbox {
             let envelope: EventEnvelope =
                 serde_json::from_value(row.try_get("envelope").map_err(OutboxError::Database)?)
                     .map_err(OutboxError::Encode)?;
-            let body = serde_json::to_vec(&envelope.payload).map_err(OutboxError::Encode)?;
+            let body = serde_json::to_vec(&envelope).map_err(OutboxError::Encode)?;
             let mut headers = async_nats::HeaderMap::new();
             headers.insert("Nats-Msg-Id", event_id.to_string());
             let acknowledgement = jetstream

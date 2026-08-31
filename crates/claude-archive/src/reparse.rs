@@ -76,20 +76,20 @@ pub struct ReparseReport {
 pub struct ReparsePlan {
     /// Operator-visible report.
     pub report: ReparseReport,
-    tenant_id: Uuid,
-    export_id: Uuid,
-    target: ParserIdentity,
-    raw: BlobRef,
-    registry_fingerprint: Vec<u8>,
-    projection_fingerprint: Vec<u8>,
-    plan_fingerprint: Vec<u8>,
-    evidence: Vec<u8>,
-    parsed: ParsedExport,
-    current: BTreeMap<String, CurrentConversation>,
+    pub(crate) tenant_id: Uuid,
+    pub(crate) export_id: Uuid,
+    pub(crate) target: ParserIdentity,
+    pub(crate) raw: BlobRef,
+    pub(crate) registry_fingerprint: Vec<u8>,
+    pub(crate) projection_fingerprint: Vec<u8>,
+    pub(crate) plan_fingerprint: Vec<u8>,
+    pub(crate) evidence: Vec<u8>,
+    pub(crate) parsed: ParsedExport,
+    pub(crate) current: BTreeMap<String, CurrentConversation>,
 }
 
 #[derive(Debug, Clone)]
-struct CurrentConversation {
+pub(crate) struct CurrentConversation {
     id: Uuid,
     title: String,
 }
@@ -307,7 +307,7 @@ async fn privacy_blocked(pool: &PgPool, tenant_id: Uuid) -> Result<bool, sqlx::E
         .bind(tenant_id.to_string()).fetch_one(pool).await
 }
 
-fn read_parser_evidence(
+pub(crate) fn read_parser_evidence(
     raw: &[u8],
     inventory: &crate::ArchiveInventory,
 ) -> Result<Vec<u8>, ReparseError> {
@@ -330,7 +330,7 @@ fn read_parser_evidence(
     Ok(evidence)
 }
 
-async fn current_projection(
+pub(crate) async fn current_projection(
     pool: &PgPool,
     export_id: Uuid,
 ) -> Result<BTreeMap<String, CurrentConversation>, sqlx::Error> {
@@ -350,7 +350,7 @@ async fn current_projection(
         .collect())
 }
 
-fn compare(
+pub(crate) fn compare(
     archive_id: Uuid,
     target: &ParserIdentity,
     raw_digest: &str,
@@ -410,7 +410,7 @@ fn compare(
     }
 }
 
-async fn apply_conversations(
+pub(crate) async fn apply_conversations(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     plan: &ReparsePlan,
 ) -> Result<(), ReparseError> {
@@ -482,7 +482,7 @@ fn digest_current(
 fn digest_json(value: &impl Serialize) -> Result<Vec<u8>, serde_json::Error> {
     Ok(Sha256::digest(serde_json::to_vec(value)?).to_vec())
 }
-fn encode_hex(bytes: &[u8]) -> String {
+pub(crate) fn encode_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes
         .iter()
@@ -491,7 +491,7 @@ fn encode_hex(bytes: &[u8]) -> String {
             out
         })
 }
-fn decode_hex(value: &str) -> Option<Vec<u8>> {
+pub(crate) fn decode_hex(value: &str) -> Option<Vec<u8>> {
     if value.len() != 64 {
         return None;
     }

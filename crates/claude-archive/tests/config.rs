@@ -216,16 +216,64 @@ fn archive_inspection_limits_reject_zero_or_inconsistent_values() {
 }
 
 #[test]
-fn event_bus_url_loads_without_rendering_its_value() {
+fn event_bus_url_requires_nkey_seed_path() {
     let endpoint = "nats://operator-secret@127.0.0.1:4222";
     let mut environment = minimal_environment();
     environment.push(("RATATOSKR__RECEIPT__EVENT_BUS_URL", endpoint));
 
-    let config = Config::from_environment(environment)
-        .expect("a valid event-bus endpoint is accepted by strict configuration");
+    let error = Config::from_environment(environment)
+        .expect_err("an operation-report endpoint without credentials must fail closed");
 
+    assert!(error.violations.iter().any(|violation| {
+        violation.key == "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH"
+            && violation.rule == "is required when the event bus URL is configured"
+    }));
+    assert!(!format!("{error}").contains(endpoint));
+}
+
+#[test]
+fn platform_receipt_mapping_requires_report_bus_and_nkey() {
+    let mut environment = minimal_environment();
+    environment.push((
+        "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS",
+        "018f0000-0000-7000-8000-000000000001=018f0000-0000-7000-8000-000000000002",
+    ));
+
+    let error = Config::from_environment(environment)
+        .expect_err("Platform receipt must not start without its terminal report bus");
     assert!(
-        !format!("{config:?}").contains(endpoint),
-        "debug output redacts the event-bus endpoint"
+        error
+            .violations
+            .iter()
+            .any(|violation| violation.key == "RATATOSKR__RECEIPT__EVENT_BUS_URL")
     );
+    assert!(
+        error
+            .violations
+            .iter()
+            .any(|violation| { violation.key == "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH" })
+    );
+}
+
+#[test]
+fn nkey_event_bus_configuration_redacts_endpoint_and_path() {
+    let endpoint = "nats://operator-secret@127.0.0.1:4222";
+    let mut environment = minimal_environment();
+    environment.extend([
+        ("RATATOSKR__RECEIPT__EVENT_BUS_URL", endpoint),
+        (
+            "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH",
+            "/run/credentials/claude.nkey",
+        ),
+    ]);
+
+    let config =
+        Config::from_environment(environment).expect("credentialed operation reporting must load");
+    assert_eq!(
+        config.receipt.event_bus_nkey_seed_path,
+        Some(std::path::PathBuf::from("/run/credentials/claude.nkey"))
+    );
+    let rendered = format!("{config:?}");
+    assert!(!rendered.contains(endpoint));
+    assert!(!rendered.contains("claude.nkey"));
 }

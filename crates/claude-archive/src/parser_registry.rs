@@ -211,6 +211,32 @@ pub struct ParserRegistry {
 }
 
 impl ParserRegistry {
+    /// Builds the compiled parser set used by the service runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParserRegistryError`] if built-in identities overlap.
+    pub fn runtime() -> Result<Self, ParserRegistryError> {
+        #[derive(Debug)]
+        struct ConsumerExecutor;
+        impl ParserExecutor for ConsumerExecutor {
+            fn execute(
+                &self,
+                input: ParserExecutionInput<'_>,
+            ) -> Result<ParsedExport, ParserExecutionError> {
+                crate::ConsumerExportParser::parse(input.evidence)
+                    .map_err(|_| ParserExecutionError::Failed)
+            }
+        }
+
+        let mut registry = Self::default();
+        registry.register_compiled(
+            crate::ConsumerExportParser::descriptor(),
+            Arc::new(ConsumerExecutor),
+        )?;
+        Ok(registry)
+    }
+
     /// Creates a registry of parser declarations.
     ///
     /// # Errors

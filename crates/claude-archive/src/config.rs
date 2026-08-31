@@ -34,6 +34,9 @@ pub struct ReceiptConfig {
     /// NATS `JetStream` endpoint for durable terminal operation reports.
     #[serde(skip_serializing)]
     pub event_bus_url: Option<SecretString>,
+    /// Absolute `NATS` `NKey` seed path for the Claude service identity.
+    #[serde(skip_serializing)]
+    pub event_bus_nkey_seed_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ReceiptConfig {
@@ -42,6 +45,7 @@ impl std::fmt::Debug for ReceiptConfig {
             .debug_struct("ReceiptConfig")
             .field("platform_accounts", &self.platform_accounts.len())
             .field("event_bus_url", &"[REDACTED]")
+            .field("event_bus_nkey_seed_path", &"[REDACTED]")
             .finish()
     }
 }
@@ -207,6 +211,28 @@ impl Config {
                 rule: "is required: the archive database has no default",
             });
         }
+        if !config.receipt.platform_accounts.is_empty()
+            && config.receipt.event_bus_url.is_none()
+            && !violations
+                .iter()
+                .any(|violation| violation.key == "RATATOSKR__RECEIPT__EVENT_BUS_URL")
+        {
+            violations.push(Violation {
+                key: "RATATOSKR__RECEIPT__EVENT_BUS_URL".to_owned(),
+                rule: "is required when Platform account mappings are configured",
+            });
+        }
+        if (config.receipt.event_bus_url.is_some() || !config.receipt.platform_accounts.is_empty())
+            && config.receipt.event_bus_nkey_seed_path.is_none()
+            && !violations
+                .iter()
+                .any(|violation| violation.key == "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH")
+        {
+            violations.push(Violation {
+                key: "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH".to_owned(),
+                rule: "is required when the event bus URL is configured",
+            });
+        }
         validate_inspection_limits(&config.limits, &mut violations);
 
         if violations.is_empty() {
@@ -261,6 +287,14 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
                 config.receipt.event_bus_url = Some(SecretString::from(value.to_owned()));
             } else {
                 violations.push(refused("must be a nats:// or tls:// endpoint"));
+            }
+        }
+        "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH" => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() && !path.as_os_str().is_empty() {
+                config.receipt.event_bus_nkey_seed_path = Some(path);
+            } else {
+                violations.push(refused("must be an absolute file path"));
             }
         }
         "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS" => match parse_platform_accounts(value) {
@@ -366,6 +400,7 @@ impl Default for Config {
             receipt: ReceiptConfig {
                 platform_accounts: Vec::new(),
                 event_bus_url: None,
+                event_bus_nkey_seed_path: None,
             },
         }
     }

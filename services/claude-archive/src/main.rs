@@ -20,7 +20,7 @@ use std::time::Duration;
 use ratatoskr_claude_archive::OperationReportOutbox;
 use ratatoskr_claude_archive::blob_store::BlobStore;
 use ratatoskr_claude_archive::telemetry::SERVICE_NAME;
-use ratatoskr_claude_archive::{Config, Database};
+use ratatoskr_claude_archive::{Config, Database, InitialImportWorker, ParserRegistry};
 use ratatoskr_claude_archive_service::RuntimeState;
 use ratatoskr_claude_archive_service::lifecycle_commands::{
     LifecycleCommandResult, ParserMigrateExecution, PortableExportExecution,
@@ -39,6 +39,7 @@ use secrecy::ExposeSecret as _;
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// Terminal reports are retried gently; each pass has its own finite broker cap.
 const OPERATION_REPORT_INTERVAL: Duration = Duration::from_secs(2);
+const INITIAL_IMPORT_INTERVAL: Duration = Duration::from_millis(250);
 
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("check-config") {
@@ -264,12 +265,9 @@ async fn tokio_main() -> Result<(), ExitCode> {
     // The first probes happen before readiness flips, so the process never
     // reports itself ready over unverified dependencies.
     let prober = spawn_probers(database.clone(), blob_store.clone(), Arc::clone(&runtime));
-    let operation_reporter = config.receipt.event_bus_url.as_ref().map(|endpoint| {
-        spawn_operation_reporter(
-            OperationReportOutbox::new(database.pool().clone()),
-            endpoint.expose_secret().to_owned(),
-        )
-    });
+    let operation_reporter = start_operation_reporter(&config, &database, Arc::clone(&runtime));
+    let initial_importer =
+        start_initial_importer(&database, &blob_store, &config.limits, Arc::clone(&runtime))?;
     runtime.mark_startup_complete();
     tracing::info!(admin = %config.admin.listen_address, "startup complete");
 
@@ -290,6 +288,7 @@ async fn tokio_main() -> Result<(), ExitCode> {
     if let Some(reporter) = operation_reporter {
         reporter.abort();
     }
+    initial_importer.abort();
 
     match serve_result {
         Ok(()) => {
@@ -310,17 +309,83 @@ async fn tokio_main() -> Result<(), ExitCode> {
 fn spawn_operation_reporter(
     outbox: OperationReportOutbox,
     endpoint: String,
+    nkey_seed_path: std::path::PathBuf,
+    runtime: Arc<RuntimeState>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(OPERATION_REPORT_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            if outbox.publish_pending_once(&endpoint).await.is_err() {
+            let ready = outbox
+                .publish_pending_once(&endpoint, &nkey_seed_path)
+                .await
+                .is_ok();
+            runtime.set_operation_report_publisher_ready(ready);
+            if !ready {
                 tracing::warn!("terminal operation report publication deferred");
             }
         }
     })
+}
+
+fn start_operation_reporter(
+    config: &Config,
+    database: &Database,
+    runtime: Arc<RuntimeState>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let (endpoint, nkey_seed_path) = config
+        .receipt
+        .event_bus_url
+        .as_ref()
+        .zip(config.receipt.event_bus_nkey_seed_path.as_ref())?;
+    runtime.set_operation_report_publisher_ready(false);
+    Some(spawn_operation_reporter(
+        OperationReportOutbox::new(database.pool().clone()),
+        endpoint.expose_secret().to_owned(),
+        nkey_seed_path.clone(),
+        runtime,
+    ))
+}
+
+fn spawn_initial_importer(
+    worker: InitialImportWorker,
+    runtime: Arc<RuntimeState>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(INITIAL_IMPORT_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let ready = worker.process_pending_once().await.is_ok();
+            runtime.set_initial_import_worker_ready(ready);
+            if !ready {
+                tracing::warn!("initial archive import pass deferred");
+            }
+        }
+    })
+}
+
+fn start_initial_importer(
+    database: &Database,
+    blob_store: &BlobStore,
+    limits: &ratatoskr_claude_archive::Limits,
+    runtime: Arc<RuntimeState>,
+) -> Result<tokio::task::JoinHandle<()>, ExitCode> {
+    runtime.set_initial_import_worker_ready(false);
+    let registry = ParserRegistry::runtime().map_err(|error| {
+        tracing::error!(%error, "the runtime parser registry was invalid");
+        ExitCode::FAILURE
+    })?;
+    Ok(spawn_initial_importer(
+        InitialImportWorker::new(
+            database.pool().clone(),
+            blob_store.clone(),
+            Arc::new(registry),
+            limits.clone(),
+        ),
+        runtime,
+    ))
 }
 
 #[allow(

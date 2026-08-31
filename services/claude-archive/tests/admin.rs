@@ -162,6 +162,26 @@ fn ready_succeeds_when_all_checks_pass() {
 }
 
 #[test]
+fn report_publisher_permission_controls_readiness_and_recovers() {
+    let runtime = Arc::new(RuntimeState::new());
+    runtime.set_database_reachable(true);
+    runtime.mark_startup_complete();
+    runtime.set_operation_report_publisher_ready(false);
+    let router =
+        ratatoskr_claude_archive_service::admin_router(Arc::clone(&runtime), || "stub".to_owned());
+    let harness = tokio::runtime::Runtime::new().expect("the test runtime starts");
+
+    let (status, body, _) = harness.block_on(async { get(router.clone(), "/health/ready").await });
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(check(&body, "operation_report_publisher")["state"], "fail");
+
+    runtime.set_operation_report_publisher_ready(true);
+    let (status, body, _) = harness.block_on(async { get(router, "/health/ready").await });
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(check(&body, "operation_report_publisher")["state"], "pass");
+}
+
+#[test]
 fn draining_reports_not_ready() {
     let runtime = Arc::new(RuntimeState::new());
     runtime.set_database_reachable(true);

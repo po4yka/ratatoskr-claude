@@ -54,6 +54,8 @@ pub struct RuntimeState {
     draining: AtomicBool,
     database: AtomicU8,
     blob_store: AtomicU8,
+    operation_report_publisher: AtomicU8,
+    initial_import_worker: AtomicU8,
 }
 
 impl RuntimeState {
@@ -103,6 +105,23 @@ impl RuntimeState {
         );
     }
 
+    /// Records whether the configured operation-report publisher currently
+    /// has authenticated broker authority.
+    pub fn set_operation_report_publisher_ready(&self, ready: bool) {
+        self.operation_report_publisher.store(
+            if ready { COMPONENT_UP } else { COMPONENT_DOWN },
+            Ordering::Release,
+        );
+    }
+
+    /// Records whether the restart-safe initial import loop completed its latest pass.
+    pub fn set_initial_import_worker_ready(&self, ready: bool) {
+        self.initial_import_worker.store(
+            if ready { COMPONENT_UP } else { COMPONENT_DOWN },
+            Ordering::Release,
+        );
+    }
+
     /// Whether new work may be routed to this process.
     #[must_use]
     pub fn is_ready(&self) -> bool {
@@ -116,6 +135,8 @@ impl RuntimeState {
             && !self.draining.load(Ordering::Acquire)
             && dependencies_up(&self.database)
             && dependencies_up(&self.blob_store)
+            && dependencies_up(&self.operation_report_publisher)
+            && dependencies_up(&self.initial_import_worker)
     }
 
     /// The readiness checks, sorted by name so two consecutive bodies are
@@ -144,6 +165,11 @@ impl RuntimeState {
         for (probe, name) in [
             (&self.blob_store, CheckName::BlobStore),
             (&self.database, CheckName::Database),
+            (
+                &self.operation_report_publisher,
+                CheckName::OperationReportPublisher,
+            ),
+            (&self.initial_import_worker, CheckName::InitialImportWorker),
         ] {
             if probe.load(Ordering::Acquire) == COMPONENT_ABSENT {
                 continue;
@@ -193,6 +219,10 @@ pub enum CheckName {
     Database,
     /// No shutdown signal has arrived.
     Drain,
+    /// The restart-safe initial import loop completed its latest bounded pass.
+    InitialImportWorker,
+    /// The authenticated terminal-report publisher can use its subject.
+    OperationReportPublisher,
     /// Configuration, telemetry and every configured listener are up.
     Startup,
 }

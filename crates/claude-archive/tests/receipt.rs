@@ -11,7 +11,9 @@
 )]
 
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use ratatoskr_claude_archive::blob_store::scratch::{remove, temp_root};
 use ratatoskr_claude_archive::test_support::TestDatabase;
@@ -19,7 +21,6 @@ use ratatoskr_claude_archive::{
     AcquisitionMode, ArchiveIdentity, BlobStore, ImportRunStore, OperationReportOutbox,
     PlatformOperation, ReceiptError, ReceiptOutcome, TenantClaim,
 };
-use ratatoskr_event_envelope::EventEnvelope;
 use sqlx::Row as _;
 use uuid::Uuid;
 
@@ -36,6 +37,45 @@ fn open_store(label: &str) -> (std::path::PathBuf, BlobStore) {
     let root = temp_root(label);
     let store = BlobStore::open(&root).expect("the store opens against a fresh directory");
     (root, store)
+}
+
+fn synthetic_zip() -> Vec<u8> {
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    writer
+        .start_file("export.json", zip::write::SimpleFileOptions::default())
+        .expect("synthetic export entry starts");
+    writer
+        .write_all(include_bytes!("fixtures/synthetic_consumer_export.json"))
+        .expect("synthetic export entry writes");
+    writer
+        .finish()
+        .expect("synthetic archive closes")
+        .into_inner()
+}
+
+fn initial_worker(
+    database: &ratatoskr_claude_archive::Database,
+    store: &BlobStore,
+) -> ratatoskr_claude_archive::InitialImportWorker {
+    ratatoskr_claude_archive::InitialImportWorker::new(
+        database.pool().clone(),
+        store.clone(),
+        Arc::new(
+            ratatoskr_claude_archive::ParserRegistry::runtime()
+                .expect("runtime parser registry is valid"),
+        ),
+        ratatoskr_claude_archive::Limits {
+            database_connections: 2,
+            database_acquire_timeout_ms: 5_000,
+            shutdown_timeout_ms: 5_000,
+            max_archive_bytes: 1_048_576,
+            max_archive_entries: 32,
+            max_entry_bytes: 1_048_576,
+            max_total_extracted_bytes: 2_097_152,
+            max_compression_ratio: 100,
+        },
+    )
 }
 
 async fn seed_account(pool: &sqlx::PgPool) -> Uuid {
@@ -238,6 +278,44 @@ async fn duplicate_receipt_names_existing_export_without_second_row_or_object() 
         object_files(&blob_root).len(),
         1,
         "exactly one raw object holds the bytes"
+    );
+
+    remove(&blob_root);
+    db.cleanup().await.expect("cleanup succeeds");
+}
+
+#[tokio::test]
+async fn equal_digest_in_two_tenants_creates_two_isolated_imports() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let first_account = seed_account(db.database.pool()).await;
+    let second_account = seed_account(db.database.pool()).await;
+    let (blob_root, store) = open_store("receipt-cross-tenant-digest");
+    let payload = multi_chunk_payload(2, 7);
+
+    for account in [first_account, second_account] {
+        let outcome = ratatoskr_claude_archive::receipt::receive_archive(
+            &db.database,
+            &store,
+            &TenantClaim {
+                account: Some(account),
+                organization: None,
+            },
+            AcquisitionMode::ConsumerExport,
+            std::io::Cursor::new(&payload),
+            10 * 1024 * 1024 * 1024,
+        )
+        .await
+        .expect("equal bytes remain isolated by owning tenant");
+        assert!(matches!(outcome, ReceiptOutcome::Stored { .. }));
+    }
+
+    assert_eq!(export_count(db.database.pool()).await, 2);
+    assert_eq!(
+        object_files(&blob_root).len(),
+        1,
+        "content-addressed raw bytes may deduplicate without sharing tenant import state"
     );
 
     remove(&blob_root);
@@ -493,7 +571,7 @@ async fn platform_archive_receipt_refuses_mismatched_digest_without_storing() {
 }
 
 #[tokio::test]
-async fn platform_archive_receipt_records_one_unknown_partial_terminal_report() {
+async fn raw_receipt_is_nonterminal_until_restart_safe_import_completes() {
     use sha2::{Digest as _, Sha256};
 
     let db = TestDatabase::create()
@@ -505,8 +583,8 @@ async fn platform_archive_receipt_records_one_unknown_partial_terminal_report() 
         organization: None,
     };
     let (blob_root, store) = open_store("receipt-platform-terminal-report");
-    let payload = b"platform receipt terminal report";
-    let digest = format!("{:x}", Sha256::digest(payload));
+    let payload = synthetic_zip();
+    let digest = format!("{:x}", Sha256::digest(&payload));
     let operation_id = Uuid::now_v7();
 
     ratatoskr_claude_archive::receipt::receive_platform_operation_archive(
@@ -514,7 +592,7 @@ async fn platform_archive_receipt_records_one_unknown_partial_terminal_report() 
         &store,
         &claim,
         AcquisitionMode::ConsumerExport,
-        std::io::Cursor::new(payload),
+        std::io::Cursor::new(&payload),
         10 * 1024 * 1024 * 1024,
         &ArchiveIdentity {
             sha256: digest,
@@ -533,27 +611,170 @@ async fn platform_archive_receipt_records_one_unknown_partial_terminal_report() 
     .fetch_all(db.database.pool())
     .await
     .expect("the outbox query succeeds");
-    assert_eq!(
-        reports.len(),
-        1,
-        "one stored Platform operation produces one durable terminal report"
+    assert!(
+        reports.is_empty(),
+        "raw persistence is nonterminal; parser/import completion owns the report"
     );
-    let envelope: EventEnvelope = serde_json::from_value(reports[0].get("envelope"))
-        .expect("the operation report envelope is valid");
-    let payload = serde_json::Value::Object(envelope.payload);
-    assert_eq!(payload["status"], "partially_succeeded");
+
+    let worker = initial_worker(&db.database, &store);
     assert_eq!(
-        payload["results"][0]["ai_archive_import_summary"]["provider"],
-        "claude"
-    );
-    assert_eq!(
-        payload["results"][0]["ai_archive_import_summary"]["completeness"],
-        "unknown"
-    );
-    assert_eq!(
-        payload["results"][0]["ai_archive_import_summary"]["gap_count"],
+        worker
+            .process_pending_once()
+            .await
+            .expect("restart worker imports the durable ZIP"),
         1
     );
+    let envelope: serde_json::Value = sqlx::query_scalar(
+        "select envelope from claude_archive.outbox_events
+         where event_type = 'platform.operation.reported.v1' and aggregate_id = $1",
+    )
+    .bind(operation_id.to_string())
+    .fetch_one(db.database.pool())
+    .await
+    .expect("terminal report is durable after import");
+    assert_eq!(envelope["producer"], "ratatoskr-claude");
+    assert_eq!(envelope["event_type"], "platform.operation.reported.v1");
+    assert!(envelope["event_id"].as_str().is_some());
+    let summary = &envelope["payload"]["results"][0]["ai_archive_import_summary"];
+    assert_eq!(summary["conversation_count"], 1);
+    assert!(
+        summary["message_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+
+    remove(&blob_root);
+    db.cleanup().await.expect("cleanup succeeds");
+}
+
+#[tokio::test]
+async fn permanent_import_failure_is_terminal_and_reported_once() {
+    use sha2::{Digest as _, Sha256};
+
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let account_id = seed_account(db.database.pool()).await;
+    let claim = TenantClaim {
+        account: Some(account_id),
+        organization: None,
+    };
+    let (blob_root, store) = open_store("receipt-platform-invalid-terminal");
+    let payload = b"not a zip archive";
+    let operation_id = Uuid::now_v7();
+    ratatoskr_claude_archive::receipt::receive_platform_operation_archive(
+        &db.database,
+        &store,
+        &claim,
+        AcquisitionMode::ConsumerExport,
+        std::io::Cursor::new(payload),
+        10 * 1024 * 1024 * 1024,
+        &ArchiveIdentity {
+            sha256: format!("{:x}", Sha256::digest(payload)),
+            byte_size: u64::try_from(payload.len()).expect("fixture length fits"),
+        },
+        PlatformOperation { operation_id },
+    )
+    .await
+    .expect("the invalid archive remains durable for terminal classification");
+
+    let worker = initial_worker(&db.database, &store);
+    assert_eq!(
+        worker
+            .process_pending_once()
+            .await
+            .expect("a permanent parser failure is handled"),
+        1
+    );
+    let state: String = sqlx::query_scalar(
+        "select r.state from claude_archive.import_runs r
+         join claude_archive.platform_operation_imports p on p.import_run_id=r.run_id
+         where p.operation_id=$1",
+    )
+    .bind(operation_id)
+    .fetch_one(db.database.pool())
+    .await
+    .expect("the failed run remains queryable");
+    assert_eq!(state, "failed");
+    let envelope: serde_json::Value = sqlx::query_scalar(
+        "select envelope from claude_archive.outbox_events
+         where event_type='platform.operation.reported.v1' and aggregate_id=$1",
+    )
+    .bind(operation_id.to_string())
+    .fetch_one(db.database.pool())
+    .await
+    .expect("one safe terminal report is durable");
+    assert_eq!(envelope["payload"]["status"], "failed");
+    assert_eq!(envelope["payload"]["error"]["retryable"], false);
+    assert_eq!(
+        envelope["payload"]["error"]["code"],
+        "claude.archive.invalid"
+    );
+
+    remove(&blob_root);
+    db.cleanup().await.expect("cleanup succeeds");
+}
+
+#[tokio::test]
+async fn duplicate_digest_reports_terminal_result_for_each_bound_operation() {
+    use sha2::{Digest as _, Sha256};
+
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let account_id = seed_account(db.database.pool()).await;
+    let claim = TenantClaim {
+        account: Some(account_id),
+        organization: None,
+    };
+    let (blob_root, store) = open_store("receipt-platform-duplicate-operations");
+    let payload = synthetic_zip();
+    let digest = format!("{:x}", Sha256::digest(&payload));
+    let operations = [Uuid::now_v7(), Uuid::now_v7()];
+
+    for operation_id in operations {
+        ratatoskr_claude_archive::receipt::receive_platform_operation_archive(
+            &db.database,
+            &store,
+            &claim,
+            AcquisitionMode::ConsumerExport,
+            std::io::Cursor::new(&payload),
+            10 * 1024 * 1024 * 1024,
+            &ArchiveIdentity {
+                sha256: digest.clone(),
+                byte_size: u64::try_from(payload.len()).expect("fixture length fits"),
+            },
+            PlatformOperation { operation_id },
+        )
+        .await
+        .expect("duplicate receipt must retain its operation binding");
+    }
+
+    assert_eq!(export_count(db.database.pool()).await, 1);
+    let bound: i64 =
+        sqlx::query_scalar("select count(*) from claude_archive.platform_operation_imports")
+            .fetch_one(db.database.pool())
+            .await
+            .expect("operation bindings are queryable");
+    assert_eq!(bound, 2, "both Platform operations remain bound");
+    let worker = initial_worker(&db.database, &store);
+    assert_eq!(
+        worker
+            .process_pending_once()
+            .await
+            .expect("one import processes both bound operations"),
+        1
+    );
+    let reports: i64 = sqlx::query_scalar(
+        "select count(*) from claude_archive.outbox_events
+         where event_type = 'platform.operation.reported.v1'
+           and aggregate_id = any($1)",
+    )
+    .bind(operations.map(|operation| operation.to_string()).to_vec())
+    .fetch_one(db.database.pool())
+    .await
+    .expect("operation reports are queryable");
+    assert_eq!(reports, 2, "every bound operation receives one result");
 
     remove(&blob_root);
     db.cleanup().await.expect("cleanup succeeds");
@@ -580,8 +801,9 @@ async fn failed_operation_report_publication_leaves_the_outbox_row_pending() {
     .expect("the pending report inserts");
 
     let publisher = OperationReportOutbox::new(db.database.pool().clone());
+    let missing_credentials = std::path::Path::new("/missing/claude-operation-report.nkey");
     let failure = publisher
-        .publish_pending_once("nats://127.0.0.1:1")
+        .publish_pending_once("nats://127.0.0.1:1", missing_credentials)
         .await
         .expect_err("an unreachable broker leaves the durable report pending");
     assert!(

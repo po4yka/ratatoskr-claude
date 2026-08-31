@@ -94,12 +94,18 @@ create table claude_archive.exports (
     detected_schema  text,
     parser_version   text,
     received_at      timestamptz not null,
-    constraint exports_scope_check check (account_ref is not null or organization_ref is not null),
+    constraint exports_scope_check check (num_nonnulls(account_ref, organization_ref) = 1),
     constraint exports_acquisition_check
         check (acquisition in ('consumer_export', 'organization_export', 'compliance_api',
-                               'manual_conversation_capture', 'legacy_import')),
-    constraint exports_archive_hash_key unique (archive_hash)
+                               'manual_conversation_capture', 'legacy_import'))
 );
+
+create unique index exports_account_archive_hash_key
+    on claude_archive.exports (account_ref, archive_hash)
+    where account_ref is not null;
+create unique index exports_organization_archive_hash_key
+    on claude_archive.exports (organization_ref, archive_hash)
+    where organization_ref is not null;
 
 comment on table claude_archive.exports is
     'One immutable snapshot of provider evidence: hash, BlobStore reference, acquisition mode.';
@@ -128,6 +134,17 @@ create table claude_archive.import_runs (
 
 comment on table claude_archive.import_runs is
     'Import progress over one snapshot, with durable warnings for anything dropped or unknown.';
+
+-- Platform operation correlation is durable at raw receipt, while terminal
+-- reporting waits for the import result. Multiple operations may reuse one
+-- immutable export and its import run.
+create table claude_archive.platform_operation_imports (
+    operation_id uuid primary key,
+    export_id    uuid not null references claude_archive.exports (export_id),
+    import_run_id uuid not null references claude_archive.import_runs (run_id),
+    created_at   timestamptz not null default now(),
+    reported_at  timestamptz
+);
 
 -- ---------------------------------------------------------------------------------------------
 -- projects
@@ -515,6 +532,9 @@ create table claude_archive.completeness_reports (
         check (status in ('complete', 'conversations_complete', 'structurally_partial',
                           'assets_partial', 'unknown', 'failed_validation'))
 );
+
+create unique index completeness_reports_run_key
+    on claude_archive.completeness_reports (run_id);
 
 comment on table claude_archive.completeness_reports is
     'The durable honesty receipt of one import: what exists, what is missing, what is unknown.';

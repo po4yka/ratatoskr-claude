@@ -10,18 +10,6 @@
 
 use uuid::Uuid;
 
-use ratatoskr_ai_archive_contracts::{
-    AiArchiveCompleteness, AiArchiveOperationSummary, AiProvider,
-};
-use ratatoskr_event_envelope::{EventEnvelope, EventPayload};
-use ratatoskr_identifiers::{
-    AiArchiveId, EntityRef, EventId, Extensions, OperationId, WireTimestamp,
-};
-use ratatoskr_operation_contracts::{
-    OperationReported, OperationResultKind, OperationResultRef, OperationStatus,
-};
-use sha2::{Digest as _, Sha256};
-
 use crate::blob_store::{BlobRef, BlobStore, MediaType, StoreError};
 use crate::database::Database;
 use crate::import_state::ImportState;
@@ -165,7 +153,7 @@ pub struct TenantClaim {
 
 /// One verified tenant identity. Construction is verification: the claim
 /// resolved to exactly one known account or organization.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TenantScope {
     /// A personal-account tenant.
     Account(Uuid),
@@ -248,7 +236,7 @@ pub async fn receive_platform_archive(
     record_stored_archive(database, scope, mode, blob_ref, None).await
 }
 
-/// Receives one Platform archive and durably records its terminal raw-receipt result.
+/// Receives one Platform archive and durably records non-terminal import work.
 ///
 /// # Errors
 ///
@@ -289,7 +277,7 @@ pub async fn receive_platform_operation_archive(
     record_stored_archive(database, scope, mode, blob_ref, Some(operation)).await
 }
 
-/// Records a previously verified Platform archive and its terminal raw-receipt report.
+/// Records a previously verified Platform archive and its operation-bound import work.
 ///
 /// Callers must authenticate the scope before streaming and pass only a
 /// [`BlobRef`] produced by the identity-verifying `BlobStore` operation.
@@ -353,7 +341,7 @@ async fn record_stored_archive(
     if let Err(error) = insert {
         drop(transaction);
         if is_archive_hash_conflict(&error) {
-            return duplicate_of(database, &digest_bytes).await;
+            return duplicate_of(database, scope, &digest_bytes, platform_operation).await;
         }
         return Err(ReceiptError::Query(error));
     }
@@ -370,24 +358,14 @@ async fn record_stored_archive(
     .map_err(ReceiptError::Query)?;
 
     if let Some(operation) = platform_operation {
-        let report = raw_stored_partial(operation, ai_archive_id)?;
-        let envelope = operation_report_envelope(&report)?;
-        let payload_digest = Sha256::digest(
-            serde_json::to_vec(&envelope.payload).map_err(ReceiptError::ReportEncoding)?,
-        );
         sqlx::query(
-            "insert into claude_archive.outbox_events
-                 (event_id, event_type, aggregate_type, aggregate_id, envelope, payload_digest,
-                  correlation_id, occurred_at)
-             values ($1, $2, 'operation', $3, $4, $5, $6, $7::timestamptz)",
+            "insert into claude_archive.platform_operation_imports
+                 (operation_id, export_id, import_run_id) values ($1, $2, $3)
+             on conflict (operation_id) do nothing",
         )
-        .bind(envelope.event_id.0)
-        .bind(envelope.event_type.to_wire())
-        .bind(operation.operation_id.to_string())
-        .bind(serde_json::to_value(&envelope).map_err(ReceiptError::ReportEncoding)?)
-        .bind(payload_digest.as_slice())
-        .bind(envelope.correlation_id.to_string())
-        .bind(envelope.occurred_at.to_string())
+        .bind(operation.operation_id)
+        .bind(export_id)
+        .bind(run_id)
         .execute(&mut *transaction)
         .await
         .map_err(ReceiptError::Query)?;
@@ -400,66 +378,6 @@ async fn record_stored_archive(
         run_id,
         blob_ref,
     })
-}
-
-/// Builds the only terminal fact raw receipt can honestly establish.
-fn raw_stored_partial(
-    operation: PlatformOperation,
-    ai_archive_id: Uuid,
-) -> Result<OperationReported, ReceiptError> {
-    let archive =
-        AiArchiveId::parse(&ai_archive_id.to_string()).map_err(|_| ReceiptError::ReportContract)?;
-    let operation_id = OperationId::parse(&operation.operation_id.to_string())
-        .map_err(|_| ReceiptError::ReportContract)?;
-    let provider = AiProvider::parse("claude").map_err(|_| ReceiptError::ReportContract)?;
-    let result_kind = OperationResultKind::parse("ai_archive.import")
-        .map_err(|_| ReceiptError::ReportContract)?;
-    let report = OperationReported {
-        operation_id,
-        status: OperationStatus::PartiallySucceeded,
-        stage: None,
-        progress_percent: None,
-        results: vec![OperationResultRef {
-            result_kind,
-            target: EntityRef::from(archive),
-            blob: None,
-            ai_archive_import_summary: Some(AiArchiveOperationSummary {
-                ai_archive_id: archive,
-                provider,
-                completeness: AiArchiveCompleteness::Unknown,
-                conversation_count: 0,
-                message_count: 0,
-                asset_count: 0,
-                gap_count: 1,
-                warning_count: 1,
-            }),
-            extensions: Extensions::new(),
-        }],
-        error: None,
-        warnings: Vec::new(),
-        extensions: Extensions::new(),
-    };
-    Ok(report)
-}
-
-fn operation_report_envelope(report: &OperationReported) -> Result<EventEnvelope, ReceiptError> {
-    let event_id = EventId::new_v7();
-    let aggregate_id = EntityRef::from(report.operation_id);
-    let mut envelope: EventEnvelope = serde_json::from_value(serde_json::json!({
-        "event_id": event_id,
-        "event_type": OperationReported::EVENT_TYPE,
-        "occurred_at": WireTimestamp::now(),
-        "producer": "ratatoskr-claude",
-        "aggregate_id": aggregate_id,
-        "correlation_id": event_id.as_entity_ref(),
-        "schema_version": 1,
-        "payload": {}
-    }))
-    .map_err(ReceiptError::ReportEncoding)?;
-    envelope
-        .set_payload(report)
-        .map_err(ReceiptError::ReportEnvelope)?;
-    Ok(envelope)
 }
 
 /// Verifies a claim against the tenants this archive knows.
@@ -525,9 +443,12 @@ async fn ensure_organization(database: &Database, organization: Uuid) -> Result<
 fn is_archive_hash_conflict(error: &sqlx::Error) -> bool {
     error.as_database_error().is_some_and(|database_error| {
         database_error.code().is_some_and(|code| code == "23505")
-            && database_error
-                .constraint()
-                .is_some_and(|name| name == "exports_archive_hash_key")
+            && database_error.constraint().is_some_and(|name| {
+                matches!(
+                    name,
+                    "exports_account_archive_hash_key" | "exports_organization_archive_hash_key"
+                )
+            })
     })
 }
 
@@ -535,16 +456,45 @@ fn is_archive_hash_conflict(error: &sqlx::Error) -> bool {
 /// duplicate outcome; absence is a corruption the caller must see loudly.
 async fn duplicate_of(
     database: &Database,
+    scope: TenantScope,
     digest_bytes: &[u8],
+    platform_operation: Option<PlatformOperation>,
 ) -> Result<ReceiptOutcome, ReceiptError> {
-    let existing: Option<Uuid> =
-        sqlx::query_scalar("select export_id from claude_archive.exports where archive_hash = $1")
-            .bind(digest_bytes)
-            .fetch_optional(database.pool())
-            .await
-            .map_err(ReceiptError::Query)?;
+    let (account_ref, organization_ref) = match scope {
+        TenantScope::Account(account) => (Some(account), None),
+        TenantScope::Organization(organization) => (None, Some(organization)),
+    };
+    let existing: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "select e.export_id, r.run_id from claude_archive.exports e
+         join claude_archive.import_runs r on r.export_id = e.export_id
+         where e.archive_hash = $1
+           and e.account_ref is not distinct from $2
+           and e.organization_ref is not distinct from $3
+         order by r.started_at limit 1",
+    )
+    .bind(digest_bytes)
+    .bind(account_ref)
+    .bind(organization_ref)
+    .fetch_optional(database.pool())
+    .await
+    .map_err(ReceiptError::Query)?;
     match existing {
-        Some(existing_export_id) => Ok(ReceiptOutcome::Duplicate { existing_export_id }),
+        Some((existing_export_id, run_id)) => {
+            if let Some(operation) = platform_operation {
+                sqlx::query(
+                    "insert into claude_archive.platform_operation_imports
+                         (operation_id, export_id, import_run_id) values ($1, $2, $3)
+                     on conflict (operation_id) do nothing",
+                )
+                .bind(operation.operation_id)
+                .bind(existing_export_id)
+                .bind(run_id)
+                .execute(database.pool())
+                .await
+                .map_err(ReceiptError::Query)?;
+            }
+            Ok(ReceiptOutcome::Duplicate { existing_export_id })
+        }
         None => Err(ReceiptError::Query(sqlx::Error::ColumnNotFound(
             "the duplicate digest vanished between conflict and lookup".to_owned(),
         ))),

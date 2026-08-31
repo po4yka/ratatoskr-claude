@@ -20,6 +20,7 @@ pub mod export_projection;
 pub mod external_reference;
 pub mod fixture_admission;
 pub mod import_state;
+mod initial_import;
 pub mod knowledge_link;
 pub mod operation_outbox;
 pub mod parser_migration;
@@ -61,6 +62,7 @@ pub use external_reference::{
     ExternalReferenceKind, LocalBackupStatus, LocalEvidence, derive_local_backup_status,
 };
 pub use import_state::{ImportError, ImportRunStore, ImportState, TransitionOutcome};
+pub use initial_import::InitialImportWorker;
 pub use knowledge_link::{KnowledgeLinkError, KnowledgeLinkOutcome, KnowledgeLinkStore};
 pub use operation_outbox::OperationReportOutbox;
 pub use parser_migration::{
