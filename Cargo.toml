@@ -16,6 +16,7 @@ repository = "https://github.com/po4yka/ratatoskr-claude"
 ratatoskr-claude-archive = { version = "=0.1.0", path = "crates/claude-archive" }
 tokio     = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-util = { version = "0.7.19", features = ["io-util"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 axum      = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 async-nats = "0.50.0"
 tower     = { version = "0.5.3", features = ["util"] }
@@ -37,10 +38,11 @@ serde     = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
 zip       = { version = "8.6.0", default-features = false, features = ["deflate"] }
-ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
-ratatoskr-ai-archive-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
-ratatoskr-operation-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
-ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "9b700fc4de2a0f8c4d61115aaa563dd999dca18b" }
+ratatoskr-identifiers = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "ad16855c4e7f3d52cd118274faa3b8f3ab4da576" }
+ratatoskr-ai-archive-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "ad16855c4e7f3d52cd118274faa3b8f3ab4da576" }
+ratatoskr-operation-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "ad16855c4e7f3d52cd118274faa3b8f3ab4da576" }
+ratatoskr-event-envelope = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "ad16855c4e7f3d52cd118274faa3b8f3ab4da576" }
+ratatoskr-error-contracts = { git = "https://github.com/po4yka/ratatoskr-contracts.git", rev = "ad16855c4e7f3d52cd118274faa3b8f3ab4da576" }
 
 [workspace.lints.rust]
 unsafe_code                   = "forbid"

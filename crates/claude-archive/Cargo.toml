@@ -12,6 +12,7 @@ async-nats.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 ratatoskr-ai-archive-contracts.workspace = true
+ratatoskr-error-contracts.workspace = true
 ratatoskr-identifiers.workspace = true
 ratatoskr-operation-contracts.workspace = true
 ratatoskr-event-envelope.workspace = true
@@ -34,6 +35,7 @@ test-support = []
 # Self-dependency so integration tests see the test-support module while the
 # default feature set stays clean for every other consumer.
 ratatoskr-claude-archive = { path = ".", features = ["test-support"] }
+futures-util.workspace = true
 sha2.workspace = true
 
 [lints]
