@@ -21,7 +21,11 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use http_body_util::BodyExt as _;
-use ratatoskr_ai_archive_contracts::platform_receipt::receipt_capability_document;
+use ratatoskr_ai_archive_contracts::platform_receipt::{
+    ARCHIVE_MEDIA_TYPE, CAPABILITIES_PATH, HEADER_ARCHIVE_BYTE_SIZE, HEADER_ARCHIVE_SHA256,
+    HEADER_CORRELATION_ID, HEADER_DEVICE_ID, HEADER_OPERATION_ID, HEADER_USER_ID, RECEIPT_PATH,
+    receipt_capability_document,
+};
 use ratatoskr_claude_archive::{
     ArchiveIdentity, BlobStore, Database, MediaType, PlatformOperation, StoreError, TenantClaim,
 };
@@ -324,11 +328,11 @@ pub fn service_router(
     admin_router(runtime, render_metrics).merge(
         Router::new()
             .route(
-                "/v1/ai-archives/receipt",
+                RECEIPT_PATH,
                 post(platform_receipt).fallback(method_not_allowed),
             )
             .route(
-                "/v1/capabilities",
+                CAPABILITIES_PATH,
                 get(receipt_capabilities).fallback(method_not_allowed),
             )
             .with_state(Arc::new(receipt))
@@ -422,7 +426,7 @@ async fn receive(
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        != Some("application/zip")
+        != Some(ARCHIVE_MEDIA_TYPE)
     {
         return Err(Kind::Invalid);
     }
@@ -433,7 +437,7 @@ async fn receive(
             ratatoskr_claude_archive::ReceiptError::UnknownTenant => Kind::Unauthenticated,
             _ => Kind::Internal,
         })?;
-    let media_type = MediaType::parse("application/zip").map_err(|_| Kind::Internal)?;
+    let media_type = MediaType::parse(ARCHIVE_MEDIA_TYPE).map_err(|_| Kind::Internal)?;
     let (reader, mut writer) = tokio::io::duplex(RECEIPT_PIPE_BYTES);
     let blob_store = state.blob_store.clone();
     let maximum = state.max_archive_bytes;
@@ -483,14 +487,12 @@ fn platform_claims(
     headers: &HeaderMap,
 ) -> Option<(TenantClaim, ArchiveIdentity, PlatformOperation)> {
     let header = |name: &'static str| headers.get(name)?.to_str().ok();
-    let user_id = header("x-ratatoskr-user-id")?.parse::<Uuid>().ok()?;
-    let _device_id = header("x-ratatoskr-device-id")?.parse::<Uuid>().ok()?;
-    let correlation = header("x-correlation-id")?;
-    let operation_id = header("x-ratatoskr-operation-id")?.parse::<Uuid>().ok()?;
-    let sha256 = header("x-ratatoskr-archive-sha256")?;
-    let byte_size = header("x-ratatoskr-archive-byte-size")?
-        .parse::<u64>()
-        .ok()?;
+    let user_id = header(HEADER_USER_ID)?.parse::<Uuid>().ok()?;
+    let _device_id = header(HEADER_DEVICE_ID)?.parse::<Uuid>().ok()?;
+    let correlation = header(HEADER_CORRELATION_ID)?;
+    let operation_id = header(HEADER_OPERATION_ID)?.parse::<Uuid>().ok()?;
+    let sha256 = header(HEADER_ARCHIVE_SHA256)?;
+    let byte_size = header(HEADER_ARCHIVE_BYTE_SIZE)?.parse::<u64>().ok()?;
     if correlation.is_empty()
         || correlation.len() > 200
         || byte_size == 0
