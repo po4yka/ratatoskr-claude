@@ -807,6 +807,10 @@ create index outbox_events_unpublished_idx
     on claude_archive.outbox_events (next_attempt_at)
     where published_at is null;
 
+-- The projection reads the latest fact of every subject it announces; this is that lookup.
+create index outbox_events_subject_latest_idx
+    on claude_archive.outbox_events (tenant_ref, aggregate_type, aggregate_id, occurred_at desc);
+
 create unique index outbox_operation_report_once
     on claude_archive.outbox_events (event_type, aggregate_id)
     where event_type = 'platform.operation.reported.v1';

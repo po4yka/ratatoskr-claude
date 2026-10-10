@@ -338,6 +338,30 @@ async fn schema_exposes_portable_privacy_reparse_and_provenance_relations() {
     db.cleanup().await.expect("cleanup succeeds");
 }
 
+/// The projection reads the latest fact of one subject on every import, once per subject, so the
+/// lookup must be an index probe and not a scan of the whole outbox.
+#[tokio::test]
+async fn the_latest_fact_lookup_of_a_subject_has_an_index() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let index: Option<String> = sqlx::query_scalar(
+        "select indexdef from pg_indexes
+         where schemaname = 'claude_archive' and tablename = 'outbox_events'
+           and indexdef like '%(tenant_ref, aggregate_type, aggregate_id, occurred_at DESC)%'
+         limit 1",
+    )
+    .fetch_optional(db.database.pool())
+    .await
+    .expect("the outbox index catalog query succeeds");
+    db.cleanup().await.expect("cleanup succeeds");
+
+    assert!(
+        index.is_some(),
+        "the latest fact of a subject is found by tenant, aggregate and newest occurrence"
+    );
+}
+
 #[tokio::test]
 async fn duplicate_archive_hash_rejected() {
     let db = TestDatabase::create()
