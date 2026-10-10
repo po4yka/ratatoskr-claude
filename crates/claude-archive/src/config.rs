@@ -2,6 +2,7 @@
 //! `RATATOSKR__` environment, where every entry is examined, unknown keys are
 //! violations, and no failure text ever echoes a supplied value.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -319,10 +320,8 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
             }
         }
         "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS" => match parse_platform_accounts(value) {
-            Some(accounts) => config.receipt.platform_accounts = accounts,
-            None => violations.push(refused(
-                "must map Platform and archive UUIDs as user=account pairs",
-            )),
+            Ok(accounts) => config.receipt.platform_accounts = accounts,
+            Err(rule) => violations.push(refused(rule)),
         },
         "RATATOSKR__LIMITS__DATABASE_CONNECTIONS" => match parse_positive::<u32>(value) {
             Ok(parsed) => config.limits.database_connections = parsed,
@@ -360,17 +359,26 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
     }
 }
 
-fn parse_platform_accounts(value: &str) -> Option<Vec<(Uuid, Uuid)>> {
+/// Parses `user=account` pairs. The owner of a fact is looked up from its account, so a user or an
+/// account that appears twice is refused: an account with two users has no single owner.
+fn parse_platform_accounts(value: &str) -> Result<Vec<(Uuid, Uuid)>, &'static str> {
     if value.is_empty() {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     }
-    value
+    let pairs: Vec<(Uuid, Uuid)> = value
         .split(',')
         .map(|pair| {
             let (user, account) = pair.split_once('=')?;
             Some((user.parse().ok()?, account.parse().ok()?))
         })
-        .collect()
+        .collect::<Option<_>>()
+        .ok_or("must map Platform and archive UUIDs as user=account pairs")?;
+    let users: HashSet<Uuid> = pairs.iter().map(|(user, _)| *user).collect();
+    let accounts: HashSet<Uuid> = pairs.iter().map(|(_, account)| *account).collect();
+    if users.len() != pairs.len() || accounts.len() != pairs.len() {
+        return Err("must map each Platform user and each archive account at most once");
+    }
+    Ok(pairs)
 }
 
 fn validate_inspection_limits(limits: &Limits, violations: &mut Vec<Violation>) {

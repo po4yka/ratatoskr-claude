@@ -102,7 +102,7 @@ answer is `application/json` carrying an `ErrorEnvelope` (`claude.auth.unauthent
 `claude.server.internal` 500), because Edge replaces any other body with `edge.upstream_invalid_response`.
 `GET /v1/capabilities` answers the unauthenticated capability document `{"service":"claude","capabilities":
 ["ai_archive.receipt"]}` on the receipt listener, where the receipt route is mounted.
-`RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` maps each Platform user to its archive account; the same mapping
+`RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` maps each Platform user to its archive account, one to one (a user or an account that appears twice is refused at startup); the same mapping
 decides the Platform owner of every `ai_archive.*` fact and every deletion tombstone, and an account without a
 mapping emits no fact.
 

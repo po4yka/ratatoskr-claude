@@ -329,3 +329,70 @@ fn nkey_event_bus_configuration_redacts_endpoint_and_path() {
     assert!(!rendered.contains(endpoint));
     assert!(!rendered.contains("claude.nkey"));
 }
+
+const USER_ONE: &str = "018f0000-0000-7000-8000-000000000001";
+const USER_TWO: &str = "018f0000-0000-7000-8000-000000000002";
+const ACCOUNT_ONE: &str = "018f0000-0000-7000-8000-0000000000a1";
+const ACCOUNT_TWO: &str = "018f0000-0000-7000-8000-0000000000a2";
+
+/// A complete environment carrying `mapping` as the Platform account mapping.
+fn mapped_environment(mapping: &str) -> Vec<(&'static str, String)> {
+    let mut environment: Vec<(&'static str, String)> = minimal_environment()
+        .into_iter()
+        .map(|(key, value)| (key, value.to_owned()))
+        .collect();
+    environment.extend([
+        ("RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS", mapping.to_owned()),
+        (
+            "RATATOSKR__RECEIPT__EVENT_BUS_URL",
+            "nats://127.0.0.1:4222".to_owned(),
+        ),
+        (
+            "RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH",
+            "/run/credentials/claude.nkey".to_owned(),
+        ),
+    ]);
+    environment
+}
+
+#[test]
+fn distinct_platform_account_pairs_are_accepted() {
+    let mapping = format!("{USER_ONE}={ACCOUNT_ONE},{USER_TWO}={ACCOUNT_TWO}");
+
+    let config = Config::from_environment(mapped_environment(&mapping))
+        .expect("two users mapped to two accounts are valid");
+
+    assert_eq!(config.receipt.platform_accounts.len(), 2);
+}
+
+#[test]
+fn two_platform_users_may_not_share_one_account() {
+    let mapping = format!("{USER_ONE}={ACCOUNT_ONE},{USER_TWO}={ACCOUNT_ONE}");
+
+    let error = Config::from_environment(mapped_environment(&mapping))
+        .expect_err("one account owned by two users would give every fact to an arbitrary one");
+
+    assert!(
+        error
+            .violations
+            .iter()
+            .any(|violation| violation.key == "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS"),
+        "the violation names the mapping: {error}"
+    );
+}
+
+#[test]
+fn one_platform_user_may_not_map_to_two_accounts() {
+    let mapping = format!("{USER_ONE}={ACCOUNT_ONE},{USER_ONE}={ACCOUNT_TWO}");
+
+    let error = Config::from_environment(mapped_environment(&mapping))
+        .expect_err("a user with two accounts has no single archive account");
+
+    assert!(
+        error
+            .violations
+            .iter()
+            .any(|violation| violation.key == "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS"),
+        "the violation names the mapping: {error}"
+    );
+}
