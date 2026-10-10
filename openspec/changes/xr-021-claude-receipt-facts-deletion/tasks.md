@@ -82,3 +82,14 @@
 - [x] 12.8 Refactor after green, no behaviour change: the two long fixtures (`the_persisted_import_is_projected_into_archive_facts`, `seed_dependents`) are split into helpers and their `too_many_lines` expectations are gone; the synthetic-import setup of `projection_subjects.rs` moved to `tests/synthetic_import/mod.rs` for the new test file.
 - [x] 12.9 Documentation, so there is no test to fail first: `design.md`, `DEVELOPMENT.md`, `README.md` and the `privacy-deletion` spec delta.
 - [x] 12.10 Run the full gate again against PostgreSQL and a JetStream-enabled `nats-server`.
+
+## 13. Fourth review fixes
+
+- [x] 13.1 RED: `tests/privacy_deletion/cross_tenant_cases.rs` seeds two accounts that hold an Artifact with one provider id and a Knowledge link for each, deletes the first account's export, and expects the second account's link, inbox row, Artifact and tombstone to be untouched while its own later deletion still tombstones its Artifact; it fails because the link queries match the provider id alone.
+- [x] 13.2 GREEN: `planning_closure.rs` and `tombstones.rs` restrict the link queries to the archives of the exports the request deletes.
+- [x] 13.3 RED: the same file expects deleting one conversation to leave the unpublished fact of another conversation's Artifact that has the same provider id; it fails because the outbox removal matches the aggregate alone. GREEN: the removal also matches the `conversation_ref` and `project_ref` of the fact.
+- [x] 13.4 RED: `tests/config.rs` expects a Platform account mapping with a repeated account or a repeated user to be refused. GREEN: `config.rs` reports the violation.
+- [x] 13.5 RED: `tests/contract_projection.rs` expects the conversation a reparse adds to be stored with its messages and announced with them; it fails because the reparse inserts the conversation alone. GREEN: the message persistence moves from the initial import into a helper that `apply_conversations` also calls for added and changed conversations.
+- [x] 13.6 Test hardening with no behaviour change: `pending_event_ids` runs the pump's own query, and `tests/operation_outbox.rs` asserts publication order through the real pump against JetStream.
+- [x] 13.7 Documentation, so there is no test to fail first: the `privacy-deletion` spec delta names the tombstones the code emits, and `design.md` records the payload-size limit and the scoping rules above.
+- [x] 13.8 Run the full gate again against PostgreSQL and a JetStream-enabled `nats-server`.

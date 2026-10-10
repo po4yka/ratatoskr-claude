@@ -36,7 +36,7 @@ Deletion SHALL remove the dependents of every removed project, conversation, mes
 
 ### Requirement: Tombstones are complete envelopes owned by the Platform user
 
-A user-requested deletion SHALL enqueue one `ai_archive.subject.tombstoned.v1` envelope per deleted archive and per Knowledge-linked subject, owned by the Platform user, with reason `user_requested`, and SHALL NOT abort because a tombstone for the same aggregate already exists. A request whose tenant reference is not a Platform user reference SHALL be rejected at planning when it has tombstone subjects.
+A user-requested deletion SHALL enqueue one `ai_archive.subject.tombstoned.v1` envelope per deleted archive, per removed conversation and project, and per Knowledge-linked Artifact, owned by the Platform user, with reason `user_requested`, and SHALL NOT abort because a tombstone for the same aggregate already exists. A request whose tenant reference is not a Platform user reference SHALL be rejected at planning when it has tombstone subjects.
 
 #### Scenario: Archive deletion tombstone
 
