@@ -40,8 +40,8 @@ use crate::{
     ReparseError,
 };
 use loaders::{
-    artifact_fact, conversation_fact, load_artifacts, load_conversations, load_projects,
-    project_fact,
+    artifact_fact, conversation_fact, head_already_announced, load_artifacts, load_conversations,
+    load_projects, project_fact,
 };
 
 /// What the import head needs to know about the report the caller just persisted.
@@ -53,6 +53,106 @@ pub(crate) struct ReportView {
     pub(crate) counts: serde_json::Value,
     /// The persisted content-free warning codes.
     pub(crate) warnings: Vec<String>,
+}
+
+impl ReportView {
+    /// The report the export's first import persisted.
+    ///
+    /// A reparse re-announces the archive head under the same archive id, and what Knowledge was
+    /// told about the completeness of that archive is a property of the import, not of one
+    /// parser release: the status, counts and warnings stay those of the first import. An export
+    /// with no persisted report is announced as `unknown`, which names a gap, rather than being
+    /// promoted to a status nobody measured.
+    pub(crate) async fn original(
+        transaction: &mut Transaction<'_, Postgres>,
+        export_id: Uuid,
+    ) -> Result<Self, ReparseError> {
+        let row: Option<(String, serde_json::Value, Option<serde_json::Value>)> = sqlx::query_as(
+            "select r.status, r.discovered_counts, r.warnings
+             from claude_archive.completeness_reports r
+             join claude_archive.import_runs i on i.run_id = r.run_id
+             where i.export_id = $1 order by r.created_at, r.report_id limit 1",
+        )
+        .bind(export_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        Ok(match row {
+            Some((status, counts, warnings)) => Self {
+                status,
+                counts,
+                warnings: warnings
+                    .as_ref()
+                    .and_then(serde_json::Value::as_array)
+                    .map(|codes| {
+                        codes
+                            .iter()
+                            .filter_map(|code| code.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            },
+            None => Self {
+                status: "unknown".to_owned(),
+                counts: serde_json::json!({}),
+                warnings: Vec::new(),
+            },
+        })
+    }
+}
+
+/// The subjects a projection could not announce, by kind.
+///
+/// A subject that cannot be projected (a row with no parser stamp, a message with no usable
+/// provider id, an Artifact with no verified bytes) is named on the import head instead of
+/// vanishing, so Knowledge can tell that its fact set is not the whole archive (XR-021
+/// CONTRACTS.md S07).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Omitted {
+    pub(crate) projects: u64,
+    pub(crate) conversations: u64,
+    pub(crate) artifacts: u64,
+}
+
+impl Omitted {
+    pub(crate) const fn is_empty(self) -> bool {
+        self.projects == 0 && self.conversations == 0 && self.artifacts == 0
+    }
+
+    /// One gap per kind that lost a subject.
+    pub(crate) fn gaps(self) -> Vec<AiGap> {
+        let mut gaps = Vec::new();
+        for (count, kind, detail) in [
+            (
+                self.projects,
+                "unprojected_project",
+                "Projects that could not be projected into facts were not announced.",
+            ),
+            (
+                self.conversations,
+                "unprojected_conversation",
+                "Conversations that could not be projected into facts were not announced.",
+            ),
+            (
+                self.artifacts,
+                "unprojected_artifact",
+                "Artifacts without verified bytes could not be projected into facts.",
+            ),
+        ] {
+            if count > 0 {
+                gaps.extend(gap(kind, detail, Some(count)));
+            }
+        }
+        gaps
+    }
+
+    /// An archive that lost a subject is never announced as complete.
+    pub(crate) fn completeness(self, status: AiArchiveCompleteness) -> AiArchiveCompleteness {
+        if !self.is_empty() && status.is_complete() {
+            AiArchiveCompleteness::StructurallyPartial
+        } else {
+            status
+        }
+    }
 }
 
 /// One import or reparse whose persisted rows are projected into facts.
@@ -155,23 +255,24 @@ pub(crate) fn contract_completeness(status: &str) -> AiArchiveCompleteness {
 }
 
 impl ImportProjection<'_> {
-    /// Enqueues every fact this import changed, returning how many were enqueued.
+    /// Enqueues every fact this import changed and returns the subjects it could not announce.
     pub(crate) async fn publish(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
-    ) -> Result<usize, ReparseError> {
+    ) -> Result<Omitted, ReparseError> {
         let Some(owner) = self.users.owner_of(self.account_id) else {
             tracing::info!(
                 class = "owner_unmapped",
                 "no archive fact for an unmapped account"
             );
-            return Ok(0);
+            return Ok(Omitted::default());
         };
         let imported_at = WireTimestamp::now();
         let provider = claude()?;
         let source_export = contract_blob_ref(self.raw)?;
         let mut subjects = Vec::new();
-        for project in load_projects(transaction, self.export_id, &provider).await? {
+        let mut omitted = Omitted::default();
+        for project in load_projects(transaction, self.export_id, &provider, &mut omitted).await? {
             if let Some(fact) = project_fact(
                 transaction,
                 self.provenance(
@@ -189,7 +290,7 @@ impl ImportProjection<'_> {
             }
         }
         let conversations =
-            load_conversations(transaction, self.export_id, owner, &provider).await?;
+            load_conversations(transaction, self.export_id, owner, &provider, &mut omitted).await?;
         let counts = (
             u32::try_from(conversations.len()).unwrap_or(u32::MAX),
             conversations
@@ -217,7 +318,9 @@ impl ImportProjection<'_> {
                 subjects.push(fact);
             }
         }
-        for artifact in load_artifacts(transaction, self.export_id, owner, &provider).await? {
+        for artifact in
+            load_artifacts(transaction, self.export_id, owner, &provider, &mut omitted).await?
+        {
             if let Some(fact) = artifact_fact(
                 transaction,
                 self.provenance(
@@ -237,20 +340,29 @@ impl ImportProjection<'_> {
                 subjects.push(fact);
             }
         }
-        if subjects.is_empty() && !self.head_always {
-            return Ok(0);
+        // An omission alone is reason enough to re-announce the head: it is the only place the
+        // loss is visible.
+        if subjects.is_empty() && !self.head_always && omitted.is_empty() {
+            return Ok(omitted);
         }
 
-        let head = self.head(owner, provider, source_export, imported_at, counts)?;
+        let head = self.head(owner, provider, source_export, imported_at, counts, omitted)?;
+        // A repeated reparse of an archive with the same omissions would announce the same gaps
+        // again; only a change in what the head says is worth an event.
+        if subjects.is_empty()
+            && !self.head_always
+            && head_already_announced(transaction, &head).await?
+        {
+            return Ok(omitted);
+        }
         ArchiveOutbox::enqueue_in(transaction, &ArchiveEventFact::Imported(head), imported_at)
             .await?;
-        let published = subjects.len() + 1;
         for fact in subjects {
             // Each fact is stamped when it is enqueued, so the pump's order by occurrence time
             // is the order of this function even where event ids share a millisecond.
             ArchiveOutbox::enqueue_in(transaction, &fact, WireTimestamp::now()).await?;
         }
-        Ok(published)
+        Ok(omitted)
     }
 
     fn provenance(
@@ -280,11 +392,13 @@ impl ImportProjection<'_> {
         source_export: ratatoskr_identifiers::BlobRef,
         imported_at: WireTimestamp,
         (conversations, messages): (u32, u32),
+        omitted: Omitted,
     ) -> Result<AiArchiveImport, ReparseError> {
-        let gaps = gaps_for(GapInput::from_counts(
+        let mut gaps = gaps_for(GapInput::from_counts(
             &self.report.status,
             &self.report.counts,
         ));
+        gaps.extend(omitted.gaps());
         let count = |name: &str| {
             self.report
                 .counts
@@ -313,7 +427,7 @@ impl ImportProjection<'_> {
             parser_name: parser_name(self.parser.identifier())?,
             parser_version: parser_version(self.parser.version())?,
             completeness_report: AiCompletenessReport {
-                completeness: contract_completeness(&self.report.status),
+                completeness: omitted.completeness(contract_completeness(&self.report.status)),
                 conversation_count: conversations,
                 message_count: messages,
                 asset_count: count("verified_knowledge_files"),

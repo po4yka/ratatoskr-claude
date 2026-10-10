@@ -9,6 +9,7 @@ const PROJECT_ADDED: &str = "ai_archive.project.added.v1";
 const PROJECT_UPDATED: &str = "ai_archive.project.updated.v1";
 const ARTIFACT_ADDED: &str = "ai_archive.artifact.added.v1";
 const ARTIFACT_UPDATED: &str = "ai_archive.artifact.updated.v1";
+const ARCHIVE_IMPORTED: &str = "ai_archive.archive.imported.v1";
 const ROLE_WARNING_CODE: &str = "ai_archive.message_role_unrepresentable";
 
 type MessageRow = (
@@ -60,6 +61,7 @@ pub(super) async fn load_projects(
     transaction: &mut Transaction<'_, Postgres>,
     export_id: Uuid,
     provider: &AiProvider,
+    omitted: &mut Omitted,
 ) -> Result<Vec<ProjectRecord>, ReparseError> {
     let rows: Vec<ProjectRow> = sqlx::query_as(
         "select p.project_id, p.external_project_id, p.title, p.description, p.instructions,
@@ -79,6 +81,7 @@ pub(super) async fn load_projects(
                 class = "project_unstamped",
                 "a project row has no parser stamp"
             );
+            omitted.projects += 1;
             continue;
         };
         records.push(ProjectRecord {
@@ -138,6 +141,24 @@ async fn latest_envelope(
         .map_err(ReparseError::from)
 }
 
+/// Whether the latest head enqueued for this archive already says what `head` says about
+/// completeness.
+pub(super) async fn head_already_announced(
+    transaction: &mut Transaction<'_, Postgres>,
+    head: &AiArchiveImport,
+) -> Result<bool, ReparseError> {
+    let aggregate = head.ai_archive_id.as_entity_ref().to_string();
+    let latest = latest_envelope(
+        transaction,
+        "archive",
+        &aggregate,
+        [ARCHIVE_IMPORTED, ARCHIVE_IMPORTED],
+    )
+    .await?
+    .and_then(|envelope| envelope.payload_as::<AiArchiveImport>().ok());
+    Ok(latest.is_some_and(|known| known.completeness_report == head.completeness_report))
+}
+
 pub(super) async fn project_fact(
     transaction: &mut Transaction<'_, Postgres>,
     provenance: AiArchiveProvenance,
@@ -194,6 +215,7 @@ pub(super) async fn load_conversations(
     export_id: Uuid,
     owner: TenantRef,
     provider: &AiProvider,
+    omitted: &mut Omitted,
 ) -> Result<Vec<AiConversation>, ReparseError> {
     let rows: Vec<ConversationRow> = sqlx::query_as(&format!(
         "select c.conversation_id, c.external_conversation_id, c.title, c.project_id,
@@ -214,9 +236,11 @@ pub(super) async fn load_conversations(
                 class = "conversation_unstamped",
                 "a conversation row has no parser stamp"
             );
+            omitted.conversations += 1;
             continue;
         };
         let Some(messages) = load_messages(transaction, conversation_id).await? else {
+            omitted.conversations += 1;
             continue;
         };
         let content_digest = AiConversation::compute_content_digest(&messages.messages)
@@ -441,6 +465,7 @@ pub(super) async fn load_artifacts(
     export_id: Uuid,
     owner: TenantRef,
     provider: &AiProvider,
+    omitted: &mut Omitted,
 ) -> Result<Vec<ArtifactRecord>, ReparseError> {
     let rows: Vec<ArtifactRow> = sqlx::query_as(
         "select a.artifact_id, a.external_artifact_id, a.title, a.conversation_id, a.project_id,
@@ -460,6 +485,7 @@ pub(super) async fn load_artifacts(
                 class = "artifact_unstamped",
                 "an Artifact row has no parser stamp"
             );
+            omitted.artifacts += 1;
             continue;
         };
         let latest: Option<(String, Option<String>, Option<i64>)> = sqlx::query_as(
@@ -472,9 +498,11 @@ pub(super) async fn load_artifacts(
         .await?;
         let Some((blob_key, Some(media_type), Some(length))) = latest else {
             // No verified bytes: the contract carries an Artifact by content blob only.
+            omitted.artifacts += 1;
             continue;
         };
         let Some(hex) = blob_key.strip_prefix("sha256/") else {
+            omitted.artifacts += 1;
             continue;
         };
         let content_digest = ContentDigest {
@@ -489,6 +517,7 @@ pub(super) async fn load_artifacts(
         }))
         .map_err(|_| ArchiveEventError::Identifier)?;
         let Ok(external_artifact_id) = EntityLocalId::parse(&external) else {
+            omitted.artifacts += 1;
             continue;
         };
         records.push(ArtifactRecord {

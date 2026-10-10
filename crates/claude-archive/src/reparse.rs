@@ -310,16 +310,7 @@ impl ReparseEngine {
             archive_id: plan.report.archive_id,
             raw: &plan.raw,
             parser: &plan.target,
-            report: ReportView {
-                status: plan.report.completeness.clone(),
-                counts: serde_json::json!({"conversations":plan.parsed.conversations.len()}),
-                warnings: plan
-                    .report
-                    .warnings
-                    .iter()
-                    .map(|warning| warning.code.clone())
-                    .collect(),
-            },
+            report: ReportView::original(&mut tx, plan.export_id).await?,
             head_always: false,
         }
         .publish(&mut tx)

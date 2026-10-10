@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
 
-use crate::contract_projection::{GapInput, ImportProjection, ReportView, gaps_for};
+use crate::contract_projection::{GapInput, ImportProjection, Omitted, ReportView, gaps_for};
 use crate::import_artifacts::persist_artifacts;
 use crate::reparse::{
     ReparseError, ReparsePlan, apply_conversations, compare, current_projection, decode_hex,
@@ -310,7 +310,7 @@ impl InitialImportWorker {
             .bind(prepared.plan.export_id).bind(prepared.detected.identifier()).bind(prepared.plan.target.version()).execute(&mut *tx).await?;
         sqlx::query("update claude_archive.import_runs set state=$2,warnings=$3,finished_at=now() where run_id=$1")
             .bind(run_id).bind(terminal_state).bind(warnings).execute(&mut *tx).await?;
-        ImportProjection {
+        let omitted = ImportProjection {
             users: &self.platform_users,
             account_id: prepared.plan.tenant_id,
             export_id: prepared.plan.export_id,
@@ -336,7 +336,7 @@ impl InitialImportWorker {
             run_id,
             prepared.plan.export_id,
             archive_id,
-            summary,
+            summary.with_omitted(omitted),
         )
         .await?;
         tx.commit().await?;
@@ -420,6 +420,20 @@ struct ImportSummary {
     assets: u32,
     gaps: u32,
     warnings: u32,
+}
+
+impl ImportSummary {
+    /// The summary of an import whose projection also lost `omitted` subjects: the operation
+    /// report agrees with the archive head about completeness and gaps.
+    fn with_omitted(self, omitted: Omitted) -> Self {
+        Self {
+            completeness: omitted.completeness(self.completeness),
+            gaps: self
+                .gaps
+                .saturating_add(u32::try_from(omitted.gaps().len()).unwrap_or(u32::MAX)),
+            ..self
+        }
+    }
 }
 
 fn summary_from(report: &crate::ArchiveCompletenessReport) -> ImportSummary {

@@ -47,23 +47,27 @@ fn limits() -> Limits {
 
 /// The documented synthetic export: two projects, one conversation and one project Artifact.
 fn synthetic_zip() -> Vec<u8> {
-    let mut export: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/synthetic_consumer_export.json"))
-            .expect("the base fixture is JSON");
     let artifacts: serde_json::Value = serde_json::from_str(include_str!(
         "fixtures/synthetic_consumer_export_artifact_v1.json"
     ))
     .expect("the Artifact fixture is JSON");
+    zip_with_artifacts(
+        artifacts
+            .get("artifacts")
+            .cloned()
+            .expect("the Artifact fixture lists artifacts"),
+    )
+}
+
+/// The synthetic export carrying exactly `artifacts`.
+fn zip_with_artifacts(artifacts: serde_json::Value) -> Vec<u8> {
+    let mut export: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/synthetic_consumer_export.json"))
+            .expect("the base fixture is JSON");
     export
         .as_object_mut()
         .expect("the base fixture is an object")
-        .insert(
-            "artifacts".to_owned(),
-            artifacts
-                .get("artifacts")
-                .cloned()
-                .expect("the Artifact fixture lists artifacts"),
-        );
+        .insert("artifacts".to_owned(), artifacts);
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     writer
         .start_file("export.json", zip::write::SimpleFileOptions::default())
@@ -134,6 +138,10 @@ struct Imported {
 }
 
 async fn import_synthetic_export(label: &str, mapped: bool) -> Imported {
+    import_export(label, mapped, synthetic_zip()).await
+}
+
+async fn import_export(label: &str, mapped: bool, archive_bytes: Vec<u8>) -> Imported {
     let db = TestDatabase::create()
         .await
         .expect("a disposable database applies the definition");
@@ -148,7 +156,6 @@ async fn import_synthetic_export(label: &str, mapped: bool) -> Imported {
     .expect("the account inserts");
     let root = temp_root(label);
     let store = BlobStore::open(&root).expect("the blob store opens");
-    let payload = synthetic_zip();
     ratatoskr_claude_archive::receipt::receive_platform_operation_archive(
         &db.database,
         &store,
@@ -157,11 +164,11 @@ async fn import_synthetic_export(label: &str, mapped: bool) -> Imported {
             organization: None,
         },
         AcquisitionMode::ConsumerExport,
-        std::io::Cursor::new(&payload),
+        std::io::Cursor::new(&archive_bytes),
         10 * 1024 * 1024 * 1024,
         &ArchiveIdentity {
-            sha256: format!("{:x}", Sha256::digest(&payload)),
-            byte_size: u64::try_from(payload.len()).expect("the fixture length fits"),
+            sha256: format!("{:x}", Sha256::digest(&archive_bytes)),
+            byte_size: u64::try_from(archive_bytes.len()).expect("the fixture length fits"),
         },
         PlatformOperation {
             operation_id: Uuid::now_v7(),
@@ -416,6 +423,10 @@ async fn publish_all(database: &Database) {
 #[tokio::test]
 async fn reparse_adds_nothing_for_identical_content_and_one_update_for_changed_content() {
     let imported = import_synthetic_export("projection-reparse", true).await;
+    let initial_head: Vec<AiArchiveImport> = payload(
+        &facts(&imported.db.database).await,
+        "ai_archive.archive.imported.v1",
+    );
     publish_all(&imported.db.database).await;
     let users = PlatformUsers::new(&[(
         Uuid::parse_str(PLATFORM_USER).expect("user UUID"),
@@ -457,6 +468,8 @@ async fn reparse_adds_nothing_for_identical_content_and_one_update_for_changed_c
     let after_changed = facts(&imported.db.database).await;
     let updates: Vec<AiConversationUpdated> =
         payload(&after_changed, "ai_archive.conversation.updated.v1");
+    let reparse_head: Vec<AiArchiveImport> =
+        payload(&after_changed, "ai_archive.archive.imported.v1");
     remove(&imported.root);
     imported.db.cleanup().await.expect("cleanup succeeds");
 
@@ -482,4 +495,134 @@ async fn reparse_adds_nothing_for_identical_content_and_one_update_for_changed_c
         update.conversation.title.as_ref().map(AiTitle::as_str),
         Some("Planting calendar (revised)")
     );
+    let initial_head = initial_head.first().expect("the import announced a head");
+    let reparse_head = reparse_head
+        .first()
+        .expect("the changed reparse re-announced a head");
+    assert_eq!(
+        reparse_head.completeness_report, initial_head.completeness_report,
+        "a reparse of a changed conversation does not change what Knowledge is told about the \
+         completeness of the archive: status, counts, asset count and gaps stay those of the import"
+    );
+    assert_eq!(
+        reparse_head.warnings, initial_head.warnings,
+        "the import warnings are carried over, not dropped"
+    );
+}
+
+/// Every subject that cannot be projected is named on the head instead of vanishing (XR-021
+/// CONTRACTS.md S07): Knowledge must be able to tell that its fact set is not the whole archive.
+#[tokio::test]
+async fn an_artifact_without_verified_bytes_is_named_as_a_gap_on_the_head() {
+    let archive = zip_with_artifacts(serde_json::json!([{
+        "id": "artifact-reference-only",
+        "type": "text/markdown",
+        "title": "Reference only",
+        "project_id": "project-garden",
+        "versions": [{"id": "artifact-reference-only-v1", "media_type": "text/markdown"}]
+    }]));
+    let imported = import_export("projection-reference-artifact", true, archive).await;
+
+    let emitted = facts(&imported.db.database).await;
+    remove(&imported.root);
+    imported.db.cleanup().await.expect("cleanup succeeds");
+
+    let head: Vec<AiArchiveImport> = payload(&emitted, "ai_archive.archive.imported.v1");
+    let head = head.first().expect("one import head");
+    head.validate().expect("the head satisfies its invariants");
+    let gap = head
+        .completeness_report
+        .gaps
+        .iter()
+        .find(|gap| gap.gap_kind.as_str() == "unprojected_artifact")
+        .expect("the omitted Artifact is named as a gap");
+    assert_eq!(
+        gap.affected_count,
+        Some(1),
+        "exactly the one Artifact is omitted"
+    );
+    assert_eq!(
+        u32::try_from(head.completeness_report.gaps.len()).expect("gap count fits"),
+        head.completeness_report.gap_count
+    );
+    assert!(
+        !head.completeness_report.completeness.is_complete(),
+        "an archive with an unprojected subject is not announced as complete"
+    );
+    assert!(
+        payload::<AiArtifactAdded>(&emitted, "ai_archive.artifact.added.v1").is_empty(),
+        "no fact is invented for the Artifact that has no verified bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_conversation_that_cannot_be_projected_is_named_as_a_gap_on_the_reparse_head() {
+    let imported = import_synthetic_export("projection-unprojectable", true).await;
+    publish_all(&imported.db.database).await;
+    sqlx::query("update claude_archive.messages set parser_name = null, parser_version = null")
+        .execute(imported.db.database.pool())
+        .await
+        .expect("the message stamps are removed");
+    let engine = ReparseEngine::new(
+        imported.db.database.pool().clone(),
+        imported.store.clone(),
+        Arc::new(reparse_registry()),
+        limits(),
+        PlatformUsers::new(&[(
+            Uuid::parse_str(PLATFORM_USER).expect("user UUID"),
+            imported.account,
+        )]),
+    );
+    let changed = engine
+        .plan(
+            imported.account,
+            imported.archive,
+            ParserIdentity::new(PARSER, "2026-09-02"),
+        )
+        .await
+        .expect("the changed reparse is planned");
+    engine
+        .apply(&changed)
+        .await
+        .expect("the changed reparse applies");
+
+    let emitted = facts(&imported.db.database).await;
+    publish_all(&imported.db.database).await;
+    let again = engine
+        .plan(
+            imported.account,
+            imported.archive,
+            ParserIdentity::new(PARSER, "2026-09-01"),
+        )
+        .await
+        .expect("the next reparse is planned");
+    engine
+        .apply(&again)
+        .await
+        .expect("the next reparse applies");
+    let repeated = facts(&imported.db.database).await;
+    remove(&imported.root);
+    imported.db.cleanup().await.expect("cleanup succeeds");
+
+    assert!(
+        repeated.is_empty(),
+        "a reparse that loses the same subject again does not repeat the same head: {:?}",
+        types(&repeated)
+    );
+    assert!(
+        payload::<AiConversationUpdated>(&emitted, "ai_archive.conversation.updated.v1").is_empty(),
+        "an unstamped conversation is not announced"
+    );
+    let head: Vec<AiArchiveImport> = payload(&emitted, "ai_archive.archive.imported.v1");
+    let head = head
+        .first()
+        .expect("an omission alone is reason enough to re-announce the head");
+    let gap = head
+        .completeness_report
+        .gaps
+        .iter()
+        .find(|gap| gap.gap_kind.as_str() == "unprojected_conversation")
+        .expect("the omitted conversation is named as a gap");
+    assert_eq!(gap.affected_count, Some(1));
+    assert!(!head.completeness_report.completeness.is_complete());
 }
