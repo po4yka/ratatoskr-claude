@@ -99,9 +99,11 @@ pub(super) async fn collect_subjects(
          join claude_archive.privacy_deletion_items i
            on i.subject_id = l.subject_id and i.item_kind = 'downstream_tombstone'
           and i.action = 'emit_tombstone'
-         where i.request_id = $1 and l.subject_kind = 'artifact' order by 1, 2",
+         where i.request_id = $1 and l.subject_kind = 'artifact'
+           and l.ai_archive_id = any($2) order by 1, 2",
     )
     .bind(request_id)
+    .bind(&archives)
     .fetch_all(&mut **transaction)
     .await?;
     let first_archive = archives.first().copied();

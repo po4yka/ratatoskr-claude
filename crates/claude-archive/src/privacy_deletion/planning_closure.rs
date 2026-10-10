@@ -428,15 +428,20 @@ async fn add_downstream(
     );
     let kinds: Vec<&str> = subjects.iter().map(|(kind, _)| *kind).collect();
     let subject_ids: Vec<String> = subjects.iter().map(|(_, id)| id.clone()).collect();
+    // A provider Artifact id recurs across tenants, so a link is the request's only when it sits
+    // under an archive of an export this deletion removes.
+    let archives = scope_archives(transaction, closure).await?;
     let linked: Vec<(Uuid, String)> = sqlx::query_as(
         "select l.completion_event_id, l.subject_id
          from claude_archive.knowledge_analysis_links l
          join unnest($1::text[], $2::text[]) as s(kind, id)
            on s.kind = l.subject_kind and s.id = l.subject_id
+         where l.ai_archive_id = any($3)
          order by l.completion_event_id",
     )
     .bind(&kinds)
     .bind(&subject_ids)
+    .bind(&archives)
     .fetch_all(&mut **transaction)
     .await?;
     let completion_ids: Vec<Uuid> = linked.iter().map(|(id, _)| *id).collect();
@@ -477,16 +482,8 @@ async fn add_downstream(
         .iter()
         .map(|id| format!("ai_conversation:{id}"))
         .chain(projects.iter().map(|id| format!("ai_project:{id}")))
-        .chain(
-            artifact_ids
-                .iter()
-                .map(|(_, external)| format!("artifact:{external}")),
-        )
         .collect();
-    aggregates.extend(archive_aggregates(transaction, closure).await?);
-    if aggregates.is_empty() {
-        return Ok(());
-    }
+    aggregates.extend(archive_aggregates(&archives));
     let outbox: Vec<Uuid> = sqlx::query_scalar(
         "select event_id from claude_archive.outbox_events
          where tenant_ref = $1 and aggregate_id = any($2)
@@ -497,37 +494,78 @@ async fn add_downstream(
     .bind(&aggregates)
     .fetch_all(&mut **transaction)
     .await?;
-    for id in outbox {
+    for id in outbox
+        .into_iter()
+        .chain(artifact_facts(transaction, tenant_ref, &artifacts).await?)
+    {
         closure.remove(DeletionItemKind::Outbox, id, None);
     }
     Ok(())
 }
 
-/// The archive aggregates of the exports the scope deletes. Their import heads name a
-/// `source_export` whose bytes the deletion erases, so the heads leave the outbox with them.
-async fn archive_aggregates(
+/// The facts of the removed Artifacts, matched by aggregate and by the scope the fact carries.
+///
+/// A provider id such as `react-component` is minted per conversation or project, so two retained
+/// and removed Artifacts of one tenant can share the aggregate `artifact:<id>`; only the facts
+/// whose `conversation_ref` and `project_ref` are those of a removed Artifact leave the outbox.
+async fn artifact_facts(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_ref: &str,
+    artifacts: &[Uuid],
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    if artifacts.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar(
+        "select distinct o.event_id
+         from claude_archive.artifacts a
+         left join claude_archive.messages m on m.message_id = a.message_id
+         join claude_archive.outbox_events o
+           on o.tenant_ref = $1 and o.aggregate_type = 'artifact'
+          and o.aggregate_id = 'artifact:' || a.external_artifact_id
+          and o.event_type <> 'ai_archive.subject.tombstoned.v1'
+          and (o.envelope #>> '{payload,artifact,conversation_ref}') is not distinct from
+              ('ai_conversation:' || coalesce(a.conversation_id, m.conversation_id)::text)
+          and (o.envelope #>> '{payload,artifact,project_ref}') is not distinct from
+              ('ai_project:' || a.project_id::text)
+         where a.artifact_id = any($2)
+         order by o.event_id",
+    )
+    .bind(tenant_ref)
+    .bind(artifacts)
+    .fetch_all(&mut **transaction)
+    .await
+}
+
+/// The archives of the exports the scope deletes.
+async fn scope_archives(
     transaction: &mut Transaction<'_, Postgres>,
     closure: &Closure<'_>,
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<Vec<Uuid>, sqlx::Error> {
     let exports: Vec<Uuid> = closure
         .items
         .iter()
         .filter(|item| item.kind == DeletionItemKind::RawArchive)
         .filter_map(|item| Uuid::parse_str(&item.subject_id).ok())
         .collect();
-    let archives = ids(
+    ids(
         transaction,
         "select distinct ai_archive_id from claude_archive.exports
          where export_id = any($1) order by ai_archive_id",
         &exports,
     )
-    .await?;
-    Ok(archives
-        .into_iter()
+    .await
+}
+
+/// The archive aggregates of those archives. Their import heads name a `source_export` whose
+/// bytes the deletion erases, so the heads leave the outbox with them.
+fn archive_aggregates(archives: &[Uuid]) -> Vec<String> {
+    archives
+        .iter()
         .map(|id| {
-            ratatoskr_identifiers::AiArchiveId(id)
+            ratatoskr_identifiers::AiArchiveId(*id)
                 .as_entity_ref()
                 .to_string()
         })
-        .collect())
+        .collect()
 }

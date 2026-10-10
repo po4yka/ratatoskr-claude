@@ -683,3 +683,6 @@ mod commit_cases;
 
 #[path = "tombstone_cases.rs"]
 mod tombstone_cases;
+
+#[path = "cross_tenant_cases.rs"]
+mod cross_tenant_cases;
