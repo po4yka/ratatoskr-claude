@@ -473,7 +473,7 @@ async fn load_portable_state(
             },
         )
         .collect();
-    let artifact_rows:Vec<PortableArtifactRow>=sqlx::query_as("select a.artifact_id,a.external_artifact_id,c.external_conversation_id,p.external_project_id,a.title from claude_archive.artifacts a left join claude_archive.conversations c on c.conversation_id=a.conversation_id left join claude_archive.projects p on p.project_id=a.project_id left join claude_archive.messages m on m.message_id=a.message_id left join claude_archive.conversations mc on mc.conversation_id=m.conversation_id where coalesce(c.account_id,p.account_id,mc.account_id)=$1 order by a.external_artifact_id").bind(account_id).fetch_all(pool).await.map_err(|_|"database_failed".to_owned())?;
+    let artifact_rows:Vec<PortableArtifactRow>=sqlx::query_as("select a.artifact_id,a.external_artifact_id,c.external_conversation_id,p.external_project_id,a.title from claude_archive.artifacts a left join claude_archive.conversations c on c.conversation_id=a.conversation_id left join claude_archive.projects p on p.project_id=a.project_id where a.account_id=$1 order by a.external_artifact_id").bind(account_id).fetch_all(pool).await.map_err(|_|"database_failed".to_owned())?;
     let mut artifacts = Vec::new();
     for (artifact_id, external_id, conversation_external_id, project_external_id, title) in
         artifact_rows

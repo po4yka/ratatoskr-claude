@@ -549,21 +549,13 @@ async fn add_account_rows(
         (
             DeletionItemKind::Artifact,
             "select a.artifact_id from claude_archive.artifacts a
-             left join claude_archive.projects p on p.project_id = a.project_id
-             left join claude_archive.conversations c on c.conversation_id = a.conversation_id
-             left join claude_archive.messages m on m.message_id = a.message_id
-             left join claude_archive.conversations mc on mc.conversation_id = m.conversation_id
-             where coalesce(p.account_id, c.account_id, mc.account_id) = $1 order by a.artifact_id",
+             where a.account_id = $1 order by a.artifact_id",
         ),
         (
             DeletionItemKind::ArtifactVersion,
             "select av.version_id from claude_archive.artifact_versions av
              join claude_archive.artifacts a on a.artifact_id = av.artifact_id
-             left join claude_archive.projects p on p.project_id = a.project_id
-             left join claude_archive.conversations c on c.conversation_id = a.conversation_id
-             left join claude_archive.messages m on m.message_id = a.message_id
-             left join claude_archive.conversations mc on mc.conversation_id = m.conversation_id
-             where coalesce(p.account_id, c.account_id, mc.account_id) = $1 order by av.version_id",
+             where a.account_id = $1 order by av.version_id",
         ),
         (
             DeletionItemKind::ExternalReference,
@@ -571,11 +563,7 @@ async fn add_account_rows(
              left join claude_archive.projects p on p.project_id = er.project_id
              left join claude_archive.conversations c on c.conversation_id = er.conversation_id
              left join claude_archive.artifacts a on a.artifact_id = er.artifact_id
-             left join claude_archive.projects ap on ap.project_id = a.project_id
-             left join claude_archive.conversations ac on ac.conversation_id = a.conversation_id
-             left join claude_archive.messages am on am.message_id = a.message_id
-             left join claude_archive.conversations amc on amc.conversation_id = am.conversation_id
-             where coalesce(p.account_id, c.account_id, ap.account_id, ac.account_id, amc.account_id) = $1
+             where coalesce(p.account_id, c.account_id, a.account_id) = $1
              order by er.reference_id",
         ),
     ] {

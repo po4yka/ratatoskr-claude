@@ -102,8 +102,8 @@ values ('43000000-0000-0000-0000-000000000001',
         '{"provider_kind":"future_variant"}');
 
 insert into claude_archive.artifacts
- (artifact_id, project_id, external_artifact_id, upstream_state, local_backup_status)
-values ('50000000-0000-0000-0000-000000000001',
+ (artifact_id, account_id, project_id, external_artifact_id, upstream_state, local_backup_status)
+values ('50000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001',
         '30000000-0000-0000-0000-000000000001', 'selected-artifact',
         'present', 'locally_backed_up');
 
@@ -671,3 +671,6 @@ mod erasure_cases;
 
 #[path = "closure_cases.rs"]
 mod closure_cases;
+
+#[path = "commit_cases.rs"]
+mod commit_cases;

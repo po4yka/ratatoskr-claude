@@ -26,7 +26,7 @@ pub(crate) async fn persist_artifacts(
 ) -> Result<(), ReparseError> {
     for artifact in artifacts {
         let owner = owner_of(tx, plan.tenant_id, artifact).await?;
-        let artifact_id = insert_artifact(tx, artifact, owner).await?;
+        let artifact_id = insert_artifact(tx, plan.tenant_id, artifact, owner).await?;
         observe(tx, plan.export_id, "artifact", artifact_id).await?;
         insert_versions(tx, plan, artifact_id, artifact).await?;
     }
@@ -86,8 +86,13 @@ async fn owner_of(
     })
 }
 
+/// Inserts the Artifact, or returns the row an earlier export of the same account created.
+///
+/// The identity of an Artifact is the account, its scope (message, conversation, project or none)
+/// and the provider id; the schema's unique indexes make each of those scopes conflict.
 async fn insert_artifact(
     tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
     artifact: &ReconciledArtifact,
     owner: Owner,
 ) -> Result<Uuid, sqlx::Error> {
@@ -99,13 +104,14 @@ async fn insert_artifact(
     });
     let inserted: Option<Uuid> = sqlx::query_scalar(
         "insert into claude_archive.artifacts
-         (artifact_id, conversation_id, message_id, project_id, external_artifact_id,
+         (artifact_id, account_id, conversation_id, message_id, project_id, external_artifact_id,
           artifact_type, language, title, upstream_state, local_backup_status,
           parser_name, parser_version)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, 'present', $9, $10, $11)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'present', $10, $11, $12)
          on conflict do nothing returning artifact_id",
     )
     .bind(Uuid::now_v7())
+    .bind(account_id)
     .bind(owner.conversation)
     .bind(owner.message)
     .bind(owner.project)
@@ -128,11 +134,12 @@ async fn insert_artifact(
         None => {
             sqlx::query_scalar(
                 "select artifact_id from claude_archive.artifacts
-                 where external_artifact_id = $1
-                   and conversation_id is not distinct from $2
-                   and message_id is not distinct from $3
-                   and project_id is not distinct from $4",
+                 where account_id = $1 and external_artifact_id = $2
+                   and conversation_id is not distinct from $3
+                   and message_id is not distinct from $4
+                   and project_id is not distinct from $5",
             )
+            .bind(account_id)
             .bind(&artifact.external_id)
             .bind(owner.conversation)
             .bind(owner.message)

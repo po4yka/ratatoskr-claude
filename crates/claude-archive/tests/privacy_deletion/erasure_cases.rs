@@ -358,9 +358,11 @@ async fn tenant_deletion_retains_only_content_free_audit() {
                 '{"private":"private-provider-payload"}');
 
         insert into claude_archive.artifacts
-         (artifact_id, project_id, external_artifact_id, title, upstream_state,
+         (artifact_id, account_id, project_id, external_artifact_id, title, upstream_state,
           local_backup_status)
         values ('c5000000-0000-0000-0000-000000000001',
+                (select account_id from claude_archive.projects
+                 where project_id = 'c3000000-0000-0000-0000-000000000001'),
                 'c3000000-0000-0000-0000-000000000001', 'private-external-artifact',
                 'private-artifact-title', 'present', 'locally_backed_up');
         insert into claude_archive.artifact_versions

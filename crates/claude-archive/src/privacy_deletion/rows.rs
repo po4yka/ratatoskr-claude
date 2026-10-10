@@ -38,6 +38,7 @@ pub(super) const HANDLED_REFERENCES: &[(&str, &str)] = &[
     ("message_relations", "parent_message_id"),
     ("message_relations", "child_message_id"),
     ("content_parts", "message_id"),
+    ("artifacts", "account_id"),
     ("artifacts", "project_id"),
     ("artifacts", "conversation_id"),
     ("artifacts", "message_id"),

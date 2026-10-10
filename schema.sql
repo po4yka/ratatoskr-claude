@@ -345,6 +345,7 @@ comment on table claude_archive.content_parts is
 
 create table claude_archive.artifacts (
     artifact_id          uuid        primary key,
+    account_id           uuid        not null references claude_archive.accounts (account_id),
     conversation_id      uuid        references claude_archive.conversations (conversation_id),
     message_id           uuid        references claude_archive.messages (message_id),
     project_id           uuid        references claude_archive.projects (project_id),
@@ -371,6 +372,8 @@ create table claude_archive.artifacts (
 
 comment on table claude_archive.artifacts is
     'Artifact identity separate from assistant text; versions carry the contents.';
+comment on column claude_archive.artifacts.account_id is
+    'The account that owns the Artifact. With the scope (message, conversation, project or none) and the provider id it is the identity of the Artifact, so a later export of the same account observes this row instead of inserting another.';
 comment on column claude_archive.artifacts.local_backup_status is
     'Evidence-derived local preservation result, independent of authorization or connectivity.';
 
@@ -380,6 +383,12 @@ create unique index artifacts_conversation_external_key
 create unique index artifacts_project_external_key
     on claude_archive.artifacts (project_id, external_artifact_id)
     where project_id is not null;
+create unique index artifacts_message_external_key
+    on claude_archive.artifacts (message_id, external_artifact_id)
+    where message_id is not null;
+create unique index artifacts_unscoped_external_key
+    on claude_archive.artifacts (account_id, external_artifact_id)
+    where conversation_id is null and message_id is null and project_id is null;
 
 -- ---------------------------------------------------------------------------------------------
 -- artifact_versions

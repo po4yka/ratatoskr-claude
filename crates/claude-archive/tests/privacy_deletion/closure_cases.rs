@@ -17,12 +17,12 @@ const ARCHIVE: &str = "b2100000-0000-0000-0000-0000000000b1";
 const CONVERSATION: &str = "b4000000-0000-0000-0000-0000000000b1";
 const TOMBSTONED: &str = "ai_archive.subject.tombstoned.v1";
 
-struct Stored {
-    reference: BlobRef,
-    key: String,
+pub(super) struct Stored {
+    pub(super) reference: BlobRef,
+    pub(super) key: String,
 }
 
-fn store_bytes(store: &BlobStore, media_type: &str, bytes: &[u8]) -> Stored {
+pub(super) fn store_bytes(store: &BlobStore, media_type: &str, bytes: &[u8]) -> Stored {
     let reference = store
         .store(
             MediaType::parse(media_type).expect("fixture media type is canonical"),
@@ -33,7 +33,7 @@ fn store_bytes(store: &BlobStore, media_type: &str, bytes: &[u8]) -> Stored {
     Stored { reference, key }
 }
 
-fn resolved(blobs: &[&Stored]) -> Vec<ResolvedDeletionBlob> {
+pub(super) fn resolved(blobs: &[&Stored]) -> Vec<ResolvedDeletionBlob> {
     blobs
         .iter()
         .map(|blob| ResolvedDeletionBlob {
@@ -51,7 +51,7 @@ async fn execute(sql: &str, pool: &PgPool) {
 }
 
 /// An account, one raw export holding `raw`, and one observed conversation with a Knowledge link.
-async fn seed_linked_conversation(pool: &PgPool, raw: &Stored) {
+pub(super) async fn seed_linked_conversation(pool: &PgPool, raw: &Stored) {
     sqlx::query(
         "insert into claude_archive.accounts (account_id, external_account_id) values ($1, 'closure-owner')",
     )
@@ -92,21 +92,30 @@ async fn seed_linked_conversation(pool: &PgPool, raw: &Stored) {
     .await;
 }
 
-async fn plan_conversation_deletion(pool: &PgPool, request: Uuid, key: &str) {
+pub(super) async fn plan_conversation_deletion(pool: &PgPool, request: Uuid, key: &str) {
+    plan_conversation_deletion_correlated(pool, request, key, &format!("privacy-delete:{request}")).await;
+}
+
+pub(super) async fn plan_conversation_deletion_correlated(
+    pool: &PgPool,
+    request: Uuid,
+    key: &str,
+    correlation_id: &str,
+) {
     PrivacyDeletionPlanner::new(pool.clone())
         .plan_conversation(&ConversationDeletionPlanRequest {
             tenant_ref: TENANT.to_owned(),
             account_id: Uuid::parse_str(ACCOUNT).expect("account UUID"),
             request_id: request,
             request_key: key.to_owned(),
-            correlation_id: format!("privacy-delete:{request}"),
+            correlation_id: correlation_id.to_owned(),
             conversation_id: Uuid::parse_str(CONVERSATION).expect("conversation UUID"),
         })
         .await
         .expect("the conversation deletion is planned");
 }
 
-async fn tombstone_envelopes(pool: &PgPool) -> Vec<EventEnvelope> {
+pub(super) async fn tombstone_envelopes(pool: &PgPool) -> Vec<EventEnvelope> {
     let rows: Vec<serde_json::Value> = sqlx::query_scalar(
         "select envelope from claude_archive.outbox_events
          where event_type = $1 order by occurred_at, event_id",
@@ -173,6 +182,11 @@ async fn tombstone_outbox_row_is_a_complete_event_envelope() {
         "the envelope names its producer, tenant and event type"
     );
     assert!(evidence_exists, "the evidence blob of every tombstone exists in the blob store");
+    assert!(
+        envelopes.iter().all(|envelope| envelope.correlation_id.to_string()
+            == format!("privacy-delete:{request}")),
+        "the envelope carries the correlation id the deletion request was recorded under"
+    );
     assert!(
         tombstones
             .iter()
@@ -538,8 +552,9 @@ async fn conversation_scope_removes_message_dependents() {
         "insert into claude_archive.export_observations (export_id, subject_kind, subject_id)
          values ('b2000000-0000-0000-0000-0000000000b1', 'conversation', 'b4000000-0000-0000-0000-0000000000b1');
          insert into claude_archive.artifacts
-          (artifact_id, conversation_id, external_artifact_id, upstream_state)
-         values ('b5000000-0000-0000-0000-0000000000b1', 'b4000000-0000-0000-0000-0000000000b1', 'conversation-artifact', 'present');
+          (artifact_id, account_id, conversation_id, external_artifact_id, upstream_state)
+         values ('b5000000-0000-0000-0000-0000000000b1', 'b1000000-0000-0000-0000-0000000000b1',
+                 'b4000000-0000-0000-0000-0000000000b1', 'conversation-artifact', 'present');
          insert into claude_archive.artifact_versions (version_id, artifact_id, external_version_id, version_index)
          values ('b5200000-0000-0000-0000-0000000000b1', 'b5000000-0000-0000-0000-0000000000b1', 'v1', 0);
          insert into claude_archive.external_references (reference_id, artifact_id, provider_reference)
@@ -667,87 +682,26 @@ async fn every_foreign_key_into_deletion_roots_is_handled() {
         })
         .map(|(table, column, parent, _)| format!("{table}.{column} -> {parent}"))
         .collect();
+    let stale: Vec<String> = handled
+        .iter()
+        .filter(|(table, column)| {
+            !references
+                .iter()
+                .any(|(child, attribute, _, _)| child == table && attribute == column)
+        })
+        .map(|(table, column)| format!("{table}.{column}"))
+        .collect();
     assert!(
         references.len() >= 20,
         "the census must see the real foreign keys, saw {}",
         references.len()
     );
     assert!(
+        stale.is_empty(),
+        "HANDLED_REFERENCES names foreign keys that no longer exist: {stale:?}"
+    );
+    assert!(
         unhandled.is_empty(),
         "foreign keys into deletion roots that are neither cascading nor handled: {unhandled:?}"
-    );
-}
-
-#[tokio::test]
-async fn rows_are_removed_before_bytes_and_a_crash_between_resumes() {
-    let root = temp_root("closure-crash");
-    let store = BlobStore::open(&root).expect("the blob store opens");
-    let raw = store_bytes(&store, "application/zip", b"closure crash archive");
-    let db = TestDatabase::create().await.expect("a disposable database");
-    seed_linked_conversation(db.database.pool(), &raw).await;
-    let request = Uuid::parse_str("b6000000-0000-0000-0000-0000000000b8").expect("request UUID");
-    plan_conversation_deletion(db.database.pool(), request, "crash").await;
-    let executor = PrivacyDeletionExecutor::new(db.database.pool().clone());
-
-    let crashed = executor
-        .finalize_with_blob_store(
-            request,
-            &store,
-            &resolved(&[&raw]),
-            Some(FinalizationFault::AfterRowsCommitted),
-        )
-        .await;
-    let after_rows: (i64, i64, i64, String) = sqlx::query_as(
-        "select (select count(*) from claude_archive.exports),
-                (select count(*) from claude_archive.privacy_deletion_items where request_id = $1),
-                (select count(*) from claude_archive.privacy_deletion_audits),
-                (select state from claude_archive.privacy_deletion_requests where request_id = $1)",
-    )
-    .bind(request)
-    .fetch_one(db.database.pool())
-    .await
-    .expect("the post-crash state is readable");
-    let raw_still_present = store.verify(&raw.reference).is_ok();
-
-    let resumed = executor
-        .finalize_with_blob_store(request, &store, &resolved(&[&raw]), None)
-        .await;
-    let after_resume: (i64, i64, String) = sqlx::query_as(
-        "select (select count(*) from claude_archive.privacy_deletion_audits),
-                (select count(*) from claude_archive.privacy_deletion_items where request_id = $1),
-                (select state from claude_archive.privacy_deletion_requests where request_id = $1)",
-    )
-    .bind(request)
-    .fetch_one(db.database.pool())
-    .await
-    .expect("the post-resume state is readable");
-    let raw_erased = store.verify(&raw.reference).is_err();
-    let replayed = executor
-        .finalize_with_blob_store(request, &store, &resolved(&[&raw]), None)
-        .await;
-    db.cleanup().await.expect("cleanup succeeds");
-    remove(&root);
-
-    assert!(
-        matches!(
-            crashed,
-            Err(PrivacyDeletionExecutionError::Injected(
-                FinalizationFault::AfterRowsCommitted
-            ))
-        ),
-        "the fault fires after the row transaction committed: {crashed:?}"
-    );
-    assert_eq!(after_rows.0, 0, "the rows are gone");
-    assert!(after_rows.1 > 0, "the items that carry the blob references are kept");
-    assert_eq!(after_rows.2, 0, "no audit exists before the bytes are erased");
-    assert_eq!(after_rows.3, "purging", "the request waits in the purging state");
-    assert!(raw_still_present, "the raw blob is still present after the crash");
-    let completed = resumed.expect("the rerun finishes the byte phase and completes");
-    assert_eq!(after_resume, (1, 0, "completed".to_owned()), "audit written, items dropped");
-    assert!(raw_erased, "the rerun erases the raw blob");
-    assert_eq!(
-        replayed.expect("a completed request replays its report"),
-        completed,
-        "the third run returns the stored report"
     );
 }
