@@ -10,6 +10,7 @@ use ratatoskr_event_envelope::{EventEnvelope, EventPayload};
 use ratatoskr_identifiers::{
     AiArchiveId, EntityRef, EventId, Extensions, OperationId, WireTimestamp,
 };
+use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
 use ratatoskr_operation_contracts::{
     OperationReported, OperationResultKind, OperationResultRef, OperationStatus,
 };
@@ -517,13 +518,14 @@ fn operation_report(
     let provider = AiProvider::parse("claude").map_err(|_| ReparseError::Conflict)?;
     let result_kind =
         OperationResultKind::parse("ai_archive.import").map_err(|_| ReparseError::Conflict)?;
+    let status = if summary.completeness == AiArchiveCompleteness::Complete {
+        OperationStatus::Succeeded
+    } else {
+        OperationStatus::PartiallySucceeded
+    };
     Ok(OperationReported {
         operation_id: operation,
-        status: if summary.completeness == AiArchiveCompleteness::Complete {
-            OperationStatus::Succeeded
-        } else {
-            OperationStatus::PartiallySucceeded
-        },
+        status,
         stage: None,
         progress_percent: None,
         results: vec![OperationResultRef {
@@ -543,7 +545,13 @@ fn operation_report(
             extensions: Extensions::new(),
         }],
         error: None,
-        warnings: Vec::new(),
+        // A partial success without a diagnostic is invalid (S06 D3): the archive was imported,
+        // and the warning says it is not complete.
+        warnings: if status == OperationStatus::PartiallySucceeded {
+            vec![incomplete_import_warning()]
+        } else {
+            Vec::new()
+        },
         extensions: Extensions::new(),
     })
 }
@@ -632,4 +640,65 @@ async fn persist_initial_projection(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
+
+    use super::*;
+
+    fn summary(completeness: AiArchiveCompleteness) -> ImportSummary {
+        ImportSummary {
+            completeness,
+            conversations: 1,
+            messages: 2,
+            assets: 0,
+            gaps: 1,
+            warnings: 0,
+        }
+    }
+
+    #[test]
+    fn an_incomplete_import_reports_partial_success_with_the_contract_warning() {
+        let report = operation_report(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            summary(AiArchiveCompleteness::AssetsPartial),
+        )
+        .expect("the report is built");
+
+        assert_eq!(
+            report.status,
+            OperationStatus::PartiallySucceeded,
+            "a non-complete import is a partial success"
+        );
+        assert_eq!(
+            report.warnings,
+            vec![incomplete_import_warning()],
+            "the partial success carries exactly the contract warning"
+        );
+        assert!(
+            report.error.is_none(),
+            "the partial success carries no error"
+        );
+        assert!(
+            report.validate().is_ok(),
+            "a producer must not emit a partial success without a diagnostic"
+        );
+    }
+
+    #[test]
+    fn a_complete_import_reports_success_without_warnings() {
+        let report = operation_report(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            summary(AiArchiveCompleteness::Complete),
+        )
+        .expect("the report is built");
+
+        assert_eq!(report.status, OperationStatus::Succeeded);
+        assert!(report.warnings.is_empty());
+        assert!(report.validate().is_ok());
+    }
 }
