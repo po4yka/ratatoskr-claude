@@ -155,11 +155,17 @@ create table claude_archive.projects (
     account_id            uuid        not null references claude_archive.accounts (account_id),
     external_project_id   text        not null,
     title                 text,
+    description           text,
+    instructions          text,
     instructions_blob_ref text,
+    parser_name           text,
+    parser_version        text,
     upstream_state        text        not null,
     local_backup_status   text        not null default 'reference_only',
     created_at            timestamptz not null default now(),
     updated_at            timestamptz not null default now(),
+    constraint projects_parser_stamp_check
+        check ((parser_name is null) = (parser_version is null)),
     constraint projects_account_external_key unique (account_id, external_project_id),
     constraint projects_upstream_state_check
         check (upstream_state in ('present', 'missing_from_latest_snapshot', 'explicitly_deleted',
@@ -174,6 +180,9 @@ comment on column claude_archive.projects.instructions_blob_ref is
     'BlobStore reference of the project instructions when the source proved them, else null.';
 comment on column claude_archive.projects.local_backup_status is
     'Evidence-derived local preservation result, independent of authorization or connectivity.';
+comment on column claude_archive.projects.parser_name is
+    'Parser release that last wrote this row; null when the row did not come from a parser. A reparse that reads '
+    'unchanged content leaves the stamp alone, so the published content digest stays stable.';
 
 create index projects_account_idx on claude_archive.projects (account_id);
 
@@ -218,12 +227,18 @@ create table claude_archive.conversations (
     conversation_id          uuid        primary key,
     account_id               uuid        not null references claude_archive.accounts (account_id),
     external_conversation_id text        not null,
+    project_id               uuid        references claude_archive.projects (project_id)
+                                         on delete set null,
     title                    text,
     upstream_state           text        not null,
     local_backup_status      text        not null default 'reference_only',
     provider_created_at      timestamptz,
+    parser_name              text,
+    parser_version           text,
     first_seen_at            timestamptz not null default now(),
     last_seen_at             timestamptz not null default now(),
+    constraint conversations_parser_stamp_check
+        check ((parser_name is null) = (parser_version is null)),
     constraint conversations_account_external_key unique (account_id, external_conversation_id),
     constraint conversations_upstream_state_check
         check (upstream_state in ('present', 'missing_from_latest_snapshot', 'explicitly_deleted',
@@ -254,8 +269,13 @@ create table claude_archive.messages (
     role                text        not null,
     model               text,
     provider_created_at timestamptz,
+    source_ordinal      integer     check (source_ordinal >= 0),
+    parser_name         text,
+    parser_version      text,
     first_seen_at       timestamptz not null default now(),
     last_seen_at        timestamptz not null default now(),
+    constraint messages_parser_stamp_check
+        check ((parser_name is null) = (parser_version is null)),
     constraint messages_conversation_external_key unique (conversation_id, external_message_id),
     constraint messages_role_check
         check (role in ('user', 'assistant', 'system', 'tool', 'internal', 'unknown'))
@@ -334,8 +354,12 @@ create table claude_archive.artifacts (
     title                text,
     upstream_state       text        not null,
     local_backup_status  text        not null default 'reference_only',
+    parser_name          text,
+    parser_version       text,
     first_seen_at        timestamptz not null default now(),
     last_seen_at         timestamptz not null default now(),
+    constraint artifacts_parser_stamp_check
+        check ((parser_name is null) = (parser_version is null)),
     constraint artifacts_single_scope_check
         check (num_nonnulls(conversation_id, message_id, project_id) <= 1),
     constraint artifacts_upstream_state_check
@@ -368,6 +392,7 @@ create table claude_archive.artifact_versions (
     previous_external_version_id text,
     version_index                bigint      not null check (version_index >= 0),
     blob_ref                     text,
+    media_type                   text,
     content_hash                 bytea,
     byte_size                    bigint,
     raw_record                   jsonb,

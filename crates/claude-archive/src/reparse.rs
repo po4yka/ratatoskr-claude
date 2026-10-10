@@ -5,6 +5,9 @@ use std::io::Read as _;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+
+use crate::contract_projection::{ImportProjection, ReportView};
+use ratatoskr_identifiers::WireTimestamp;
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -12,7 +15,7 @@ use uuid::Uuid;
 use crate::{
     ArchiveError, ArchiveInspector, BlobRef, BlobStore, DigestAlgorithm, Limits, MediaType,
     ParsedExport, ParserCapability, ParserExecutionError, ParserExecutionInput, ParserIdentity,
-    ParserRegistry, StoreError,
+    ParserRegistry, PlatformUsers, StoreError,
 };
 
 /// Classification of one normalized subject comparison.
@@ -118,6 +121,12 @@ pub enum ReparseError {
     /// Stable report encoding failed.
     #[error("reparse report encoding failed")]
     Encode(#[from] serde_json::Error),
+    /// Artifact reconciliation refused the observed evidence.
+    #[error("reparse artifact reconciliation failed")]
+    Artifact(#[from] crate::ArtifactReconciliationError),
+    /// An archive fact could not be built or enqueued.
+    #[error("reparse archive fact could not be recorded")]
+    Event(#[from] crate::ArchiveEventError),
 }
 
 /// Plans and applies exact parser replay.
@@ -127,6 +136,7 @@ pub struct ReparseEngine {
     blobs: BlobStore,
     registry: Arc<ParserRegistry>,
     limits: Limits,
+    platform_users: PlatformUsers,
 }
 
 impl ReparseEngine {
@@ -137,12 +147,14 @@ impl ReparseEngine {
         blobs: BlobStore,
         registry: Arc<ParserRegistry>,
         limits: Limits,
+        platform_users: PlatformUsers,
     ) -> Self {
         Self {
             pool,
             blobs,
             registry,
             limits,
+            platform_users,
         }
     }
 
@@ -156,7 +168,7 @@ impl ReparseEngine {
         archive_id: Uuid,
         target: ParserIdentity,
     ) -> Result<ReparsePlan, ReparseError> {
-        if privacy_blocked(&self.pool, tenant_id).await? {
+        if privacy_blocked(&self.pool, tenant_id, &self.platform_users).await? {
             return Err(ReparseError::Conflict);
         }
         let row: Option<ExportReplayRow> = sqlx::query_as(
@@ -244,7 +256,7 @@ impl ReparseEngine {
         if let Some(report) = prior_report(&self.pool, plan).await? {
             return Ok(report);
         }
-        if privacy_blocked(&self.pool, plan.tenant_id).await?
+        if privacy_blocked(&self.pool, plan.tenant_id, &self.platform_users).await?
             || digest_current(&current_projection(&self.pool, plan.export_id).await?)?
                 != plan.projection_fingerprint
         {
@@ -291,6 +303,27 @@ impl ReparseEngine {
             .bind(decode_hex(&plan.raw.digest_hex).ok_or(ReparseError::Conflict)?).bind(&plan.registry_fingerprint)
             .bind(&plan.projection_fingerprint).bind(&plan.plan_fingerprint).bind(state).bind(report_json)
             .bind(format!("reparse:{}",plan.report.archive_id)).execute(&mut *tx).await?;
+        ImportProjection {
+            users: &self.platform_users,
+            account_id: plan.tenant_id,
+            export_id: plan.export_id,
+            archive_id: plan.report.archive_id,
+            raw: &plan.raw,
+            parser: &plan.target,
+            report: ReportView {
+                status: plan.report.completeness.clone(),
+                counts: serde_json::json!({"conversations":plan.parsed.conversations.len()}),
+                warnings: plan
+                    .report
+                    .warnings
+                    .iter()
+                    .map(|warning| warning.code.clone())
+                    .collect(),
+            },
+            head_always: false,
+        }
+        .publish(&mut tx)
+        .await?;
         tx.commit().await?;
         Ok(plan.report.clone())
     }
@@ -302,9 +335,17 @@ impl ReparseEngine {
     }
 }
 
-async fn privacy_blocked(pool: &PgPool, tenant_id: Uuid) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("select exists(select 1 from claude_archive.privacy_deletion_requests where tenant_ref=$1 and state<>'completed')")
-        .bind(tenant_id.to_string()).fetch_one(pool).await
+/// Whether an unfinished deletion holds this account. A deletion is keyed by the Platform user
+/// reference when its account is mapped and by the account id otherwise, so both are checked.
+async fn privacy_blocked(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    users: &PlatformUsers,
+) -> Result<bool, sqlx::Error> {
+    let mut references = vec![tenant_id.to_string()];
+    references.extend(users.tenant_ref_of(tenant_id));
+    sqlx::query_scalar("select exists(select 1 from claude_archive.privacy_deletion_requests where tenant_ref=any($1) and state<>'completed')")
+        .bind(references).fetch_one(pool).await
 }
 
 pub(crate) fn read_parser_evidence(
@@ -426,13 +467,28 @@ pub(crate) async fn apply_conversations(
         let subject_id = if let Some(current) = plan.current.get(&change.subject_id) {
             current.id
         } else {
-            let id = Uuid::now_v7();
-            sqlx::query("insert into claude_archive.conversations (conversation_id,account_id,external_conversation_id,title,upstream_state) values ($1,$2,$3,$4,'present')").bind(id).bind(plan.tenant_id).bind(&parsed.external_id).bind(&parsed.title).execute(&mut **tx).await?;
+            let project_id: Option<Uuid> = match parsed.project_external_id.as_deref() {
+                Some(external) => sqlx::query_scalar("select project_id from claude_archive.projects where account_id=$1 and external_project_id=$2")
+                    .bind(plan.tenant_id).bind(external).fetch_optional(&mut **tx).await?,
+                None => None,
+            };
+            let created = parsed
+                .created_at
+                .as_deref()
+                .and_then(|value| WireTimestamp::parse(value).ok())
+                .map(|instant| instant.to_string());
+            let id: Uuid = sqlx::query_scalar("insert into claude_archive.conversations (conversation_id,account_id,external_conversation_id,project_id,title,upstream_state,provider_created_at,parser_name,parser_version) values ($1,$2,$3,$4,$5,'present',$6::timestamptz,$7,$8) on conflict (account_id,external_conversation_id) do update set last_seen_at=now() returning conversation_id")
+                .bind(Uuid::now_v7()).bind(plan.tenant_id).bind(&parsed.external_id).bind(project_id).bind(&parsed.title)
+                .bind(created).bind(&parsed.parser.parser_identifier).bind(&parsed.parser.parser_version)
+                .fetch_one(&mut **tx).await?;
             sqlx::query("insert into claude_archive.export_observations (export_id,subject_kind,subject_id) values ($1,'conversation',$2) on conflict do nothing").bind(plan.export_id).bind(id).execute(&mut **tx).await?;
             id
         };
         if change.kind == ReparseChangeKind::Changed {
-            sqlx::query("update claude_archive.conversations set title=$1,last_seen_at=now() where conversation_id=$2").bind(&parsed.title).bind(subject_id).execute(&mut **tx).await?;
+            sqlx::query("update claude_archive.conversations set title=$1,parser_name=$3,parser_version=$4,last_seen_at=now() where conversation_id=$2")
+                .bind(&parsed.title).bind(subject_id)
+                .bind(&parsed.parser.parser_identifier).bind(&parsed.parser.parser_version)
+                .execute(&mut **tx).await?;
         }
         if matches!(
             change.kind,
@@ -441,9 +497,6 @@ pub(crate) async fn apply_conversations(
             let revision_index:i64=sqlx::query_scalar("select coalesce(max(revision_index),-1)+1 from claude_archive.revisions where subject_kind='conversation' and subject_id=$1").bind(subject_id).fetch_one(&mut **tx).await?;
             let raw_record = serde_json::json!({"external_id":parsed.external_id,"title":parsed.title,"parser":plan.report.target_parser});
             sqlx::query("insert into claude_archive.revisions (revision_id,subject_kind,subject_id,export_id,revision_index,raw_record) values ($1,'conversation',$2,$3,$4,$5)").bind(Uuid::now_v7()).bind(subject_id).bind(plan.export_id).bind(revision_index).bind(raw_record).execute(&mut **tx).await?;
-            let envelope = serde_json::json!({"archive_id":plan.report.archive_id,"subject_kind":"conversation","subject_id":subject_id,"parser":plan.report.target_parser});
-            let bytes = serde_json::to_vec(&envelope)?;
-            sqlx::query("insert into claude_archive.outbox_events (event_id,event_type,aggregate_type,aggregate_id,envelope,payload_digest,correlation_id,tenant_ref,occurred_at) values ($1,'claude.subject.reparsed.v1','conversation',$2,$3,$4,$5,$6,now()) on conflict (event_type,payload_digest) do nothing").bind(Uuid::now_v7()).bind(plan.export_id.to_string()).bind(envelope).bind(Sha256::digest(bytes).as_slice()).bind(format!("reparse:{}",plan.report.archive_id)).bind(plan.tenant_id.to_string()).execute(&mut **tx).await?;
         }
     }
     Ok(())

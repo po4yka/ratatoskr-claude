@@ -158,7 +158,7 @@ impl<'a> ArchiveOutbox<'a> {
         occurred_at: WireTimestamp,
     ) -> Result<OutboxEvent, ArchiveEventError> {
         let event_id = EventId::new_v7();
-        let envelope = build_envelope(event_id, fact, occurred_at)?;
+        let envelope = build_envelope(event_id, fact, occurred_at, &event_id.as_entity_ref())?;
         let (aggregate_type, aggregate_id) = fact.aggregate()?;
         let envelope_json =
             serde_json::to_value(&envelope).map_err(|_| ArchiveEventError::Identifier)?;
@@ -201,6 +201,73 @@ impl<'a> ArchiveOutbox<'a> {
     }
 }
 
+impl ArchiveOutbox<'_> {
+    /// Stores one tombstone envelope in a caller-owned transaction, correlated to the request that
+    /// caused it, unless its aggregate already has one.
+    ///
+    /// The insert names no conflict target: a provider tombstone for the same aggregate, or an
+    /// earlier request for the same subject, trips `outbox_privacy_tombstone_once` or the payload
+    /// key, and either must skip this row instead of aborting the deletion that wrote it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveEventError`] when the tombstone cannot be encoded or the insert fails.
+    pub(crate) async fn enqueue_tombstone_in(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        tombstone: &AiArchiveTombstone,
+        correlation_id: EntityRef,
+        occurred_at: WireTimestamp,
+    ) -> Result<Option<OutboxEvent>, ArchiveEventError> {
+        let event_id = EventId::new_v7();
+        let fact = ArchiveEventFact::Tombstoned(tombstone.clone());
+        let envelope = build_envelope(event_id, &fact, occurred_at, &correlation_id)?;
+        let (aggregate_type, aggregate_id) = fact.aggregate()?;
+        let payload_digest = Sha256::digest(serde_json::to_vec(&envelope.payload)?).to_vec();
+        let inserted: Option<uuid::Uuid> = sqlx::query_scalar(
+            "insert into claude_archive.outbox_events
+                 (event_id, event_type, aggregate_type, aggregate_id, envelope,
+                  payload_digest, correlation_id, causation_id, tenant_ref, occurred_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz)
+             on conflict do nothing
+             returning event_id",
+        )
+        .bind(event_id.0)
+        .bind(envelope.event_type.to_wire())
+        .bind(aggregate_type)
+        .bind(aggregate_id)
+        .bind(serde_json::to_value(&envelope)?)
+        .bind(&payload_digest)
+        .bind(envelope.correlation_id.to_string())
+        .bind(envelope.causation_id.as_ref().map(ToString::to_string))
+        .bind(envelope.tenant_id.as_ref().map(ToString::to_string))
+        .bind(occurred_at.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?;
+        Ok(inserted.map(|_| OutboxEvent { envelope }))
+    }
+}
+
+/// The contract spelling of a blob this service stored.
+///
+/// # Errors
+///
+/// Returns [`ArchiveEventError::Identifier`] when a stored reference does not satisfy the
+/// contract grammars, which a reference the blob store produced always does.
+pub(crate) fn contract_blob_ref(
+    reference: &crate::BlobRef,
+) -> Result<ratatoskr_identifiers::BlobRef, ArchiveEventError> {
+    serde_json::from_value(serde_json::json!({
+        "owner_service": reference.owner_service,
+        "digest": {
+            "algorithm": reference.algorithm.identifier(),
+            "hex": reference.digest_hex,
+        },
+        "media_type": reference.media_type.as_str(),
+        "length_bytes": reference.length_bytes,
+    }))
+    .map_err(|_| ArchiveEventError::Identifier)
+}
+
 fn subject_belongs_to_import(subject: &ArchiveEventFact, import: &AiArchiveImport) -> bool {
     let expected = ratatoskr_ai_archive_contracts::AiArchiveProvenance::from_import(import);
     match subject {
@@ -218,16 +285,16 @@ fn build_envelope(
     event_id: EventId,
     fact: &ArchiveEventFact,
     occurred_at: WireTimestamp,
+    correlation_id: &EntityRef,
 ) -> Result<EventEnvelope, ArchiveEventError> {
     let (aggregate_id, tenant_id) = fact.aggregate_reference()?;
-    let event_reference = event_id.as_entity_ref();
     let mut envelope: EventEnvelope = serde_json::from_value(serde_json::json!({
         "event_id": event_id,
         "event_type": "ai_archive.archive.imported.v1",
         "occurred_at": occurred_at,
         "producer": "ratatoskr-claude",
         "aggregate_id": aggregate_id,
-        "correlation_id": event_reference,
+        "correlation_id": correlation_id,
         "tenant_id": tenant_id,
         "schema_version": 1,
         "payload": {}

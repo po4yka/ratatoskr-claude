@@ -20,7 +20,9 @@ use std::time::Duration;
 use ratatoskr_claude_archive::OutboxPublisher;
 use ratatoskr_claude_archive::blob_store::BlobStore;
 use ratatoskr_claude_archive::telemetry::SERVICE_NAME;
-use ratatoskr_claude_archive::{Config, Database, InitialImportWorker, ParserRegistry};
+use ratatoskr_claude_archive::{
+    Config, Database, InitialImportWorker, ParserRegistry, PlatformUsers,
+};
 use ratatoskr_claude_archive_service::RuntimeState;
 use ratatoskr_claude_archive_service::lifecycle_commands::{
     LifecycleCommandResult, ParserMigrateExecution, PortableExportExecution,
@@ -258,8 +260,13 @@ async fn tokio_main() -> Result<(), ExitCode> {
     let prober = spawn_probers(database.clone(), blob_store.clone(), Arc::clone(&runtime));
     let (operation_reporter, reporter_stopped) =
         start_operation_reporter(&config, &database, Arc::clone(&runtime)).unzip();
-    let initial_importer =
-        start_initial_importer(&database, &blob_store, &config.limits, Arc::clone(&runtime))?;
+    let initial_importer = start_initial_importer(
+        &database,
+        &blob_store,
+        &config.limits,
+        PlatformUsers::new(&config.receipt.platform_accounts),
+        Arc::clone(&runtime),
+    )?;
     runtime.mark_startup_complete();
     tracing::info!(admin = %config.admin.listen_address, "startup complete");
 
@@ -406,6 +413,7 @@ fn start_initial_importer(
     database: &Database,
     blob_store: &BlobStore,
     limits: &ratatoskr_claude_archive::Limits,
+    platform_users: PlatformUsers,
     runtime: Arc<RuntimeState>,
 ) -> Result<tokio::task::JoinHandle<()>, ExitCode> {
     runtime.set_initial_import_worker_ready(false);
@@ -419,6 +427,7 @@ fn start_initial_importer(
             blob_store.clone(),
             Arc::new(registry),
             limits.clone(),
+            platform_users,
         ),
         runtime,
     ))

@@ -10,7 +10,7 @@ use ratatoskr_claude_archive::test_support::TestDatabase;
 use ratatoskr_claude_archive::{
     AcquisitionMode, BlobStore, Conversation, Database, Limits, ParsedExport, ParserCapability,
     ParserDescriptor, ParserExecutionError, ParserExecutionInput, ParserExecutor, ParserIdentity,
-    ParserRegistry, ParserStamp, ReparseChangeKind,
+    ParserRegistry, ParserStamp, PlatformUsers, ReparseChangeKind,
 };
 use uuid::Uuid;
 
@@ -174,7 +174,13 @@ async fn reparse_dry_run_matches_immediate_apply_without_writes()
     let root = std::env::temp_dir().join(format!("claude-reparse-{}", Uuid::now_v7()));
     let blobs = BlobStore::open(&root)?;
     let (tenant, archive, export) = seed(db, &blobs).await?;
-    let engine = ReparseEngine::new(db.pool().clone(), blobs, Arc::new(registry()?), limits());
+    let engine = ReparseEngine::new(
+        db.pool().clone(),
+        blobs,
+        Arc::new(registry()?),
+        limits(),
+        PlatformUsers::default(),
+    );
     let before = counts(db, export).await?;
     let plan = engine
         .plan(tenant, archive, ParserIdentity::new("claude-test", "2.0"))
@@ -210,7 +216,13 @@ async fn reparse_apply_is_idempotent_for_same_fingerprints()
     let root = std::env::temp_dir().join(format!("claude-reparse-{}", Uuid::now_v7()));
     let blobs = BlobStore::open(&root)?;
     let (tenant, archive, export) = seed(db, &blobs).await?;
-    let engine = ReparseEngine::new(db.pool().clone(), blobs, Arc::new(registry()?), limits());
+    let engine = ReparseEngine::new(
+        db.pool().clone(),
+        blobs,
+        Arc::new(registry()?),
+        limits(),
+        PlatformUsers::default(),
+    );
     let plan = engine
         .plan(tenant, archive, ParserIdentity::new("claude-test", "2.0"))
         .await?;
@@ -218,8 +230,8 @@ async fn reparse_apply_is_idempotent_for_same_fingerprints()
     let before_replay = evidence_counts(db, export).await?;
     assert_eq!(
         before_replay,
-        (1, 1, 1, 1, 1),
-        "one apply must persist each evidence class exactly once"
+        (1, 1, 1, 1, 0),
+        "one apply must persist each evidence class exactly once, and publishes no legacy event"
     );
     let replay = engine.apply(&plan).await?;
     assert_eq!(replay, first, "replay must return the original report");
@@ -246,6 +258,7 @@ async fn reparse_omission_retains_existing_subject_with_warning()
         blobs,
         Arc::new(omitting_registry()?),
         limits(),
+        PlatformUsers::default(),
     );
     let plan = engine
         .plan(tenant, archive, ParserIdentity::new("claude-test", "2.0"))

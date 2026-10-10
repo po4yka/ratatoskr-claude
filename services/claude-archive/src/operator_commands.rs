@@ -16,7 +16,7 @@ use ratatoskr_claude_archive::privacy_deletion::{
 use ratatoskr_claude_archive::{
     BlobRef, BlobStore, Config, Database, DigestAlgorithm, MediaType, ParserIdentity,
     ParserMigrationEntry, ParserMigrationEntryStatus, ParserMigrationPlan, ParserMigrationReport,
-    ParserRegistry, ReparseChangeKind, ReparseEngine,
+    ParserRegistry, PlatformUsers, ReparseChangeKind, ReparseEngine, StoreError,
 };
 use secrecy::ExposeSecret as _;
 use sha2::{Digest as _, Sha256};
@@ -54,6 +54,7 @@ pub struct OperatorContext {
     registry: Arc<ParserRegistry>,
     limits: ratatoskr_claude_archive::Limits,
 }
+    platform_users: PlatformUsers,
 
 impl OperatorContext {
     /// Opens configured operator dependencies and applies the current schema.
@@ -93,6 +94,7 @@ impl OperatorContext {
             registry: Arc::new(registry),
             limits: config.limits,
         })
+            platform_users: PlatformUsers::new(&config.receipt.platform_accounts),
     }
 
     /// Executes deterministic portable export from tenant-scoped database state.
@@ -352,6 +354,7 @@ fn parse_target(command: &PrivacyDeletePlanCommand) -> Uuid {
         .unwrap_or(Uuid::nil())
 }
 async fn existing_request(pool: &PgPool, tenant: &str, key: &str) -> Result<Option<Uuid>, ()> {
+            self.platform_users.clone(),
     sqlx::query_scalar("select request_id from claude_archive.privacy_deletion_requests where tenant_ref=$1 and request_key=$2").bind(tenant).bind(key).fetch_optional(pool).await.map_err(|_|())
 }
 

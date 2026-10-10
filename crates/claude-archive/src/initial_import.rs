@@ -10,7 +10,6 @@ use ratatoskr_event_envelope::{EventEnvelope, EventPayload};
 use ratatoskr_identifiers::{
     AiArchiveId, EntityRef, EventId, Extensions, OperationId, WireTimestamp,
 };
-use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
 use ratatoskr_operation_contracts::{
     OperationReported, OperationResultKind, OperationResultRef, OperationStatus,
 };
@@ -18,13 +17,17 @@ use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
+
+use crate::contract_projection::{GapInput, ImportProjection, ReportView, gaps_for};
+use crate::import_artifacts::persist_artifacts;
 use crate::reparse::{
     ReparseError, ReparsePlan, apply_conversations, compare, current_projection, decode_hex,
     encode_hex, read_parser_evidence,
 };
 use crate::{
     ArchiveInspector, BlobRef, BlobStore, DigestAlgorithm, Limits, MediaType, ParserCapability,
-    ParserExecutionInput, ParserIdentity, ParserRegistry,
+    ParserExecutionInput, ParserIdentity, ParserRegistry, PlatformUsers,
 };
 
 /// Restart-safe executor for stored raw archives and late operation bindings.
@@ -34,6 +37,7 @@ pub struct InitialImportWorker {
     blobs: BlobStore,
     registry: Arc<ParserRegistry>,
     limits: Limits,
+    platform_users: PlatformUsers,
 }
 
 #[derive(Debug)]
@@ -42,6 +46,7 @@ struct PreparedInitialImport {
     evidence_ref: BlobRef,
     completeness: crate::ArchiveCompletenessReport,
     detected: crate::DetectedSchema,
+    artifacts: Vec<crate::ReconciledArtifact>,
 }
 
 #[derive(Debug)]
@@ -63,12 +68,14 @@ impl InitialImportWorker {
         blobs: BlobStore,
         registry: Arc<ParserRegistry>,
         limits: Limits,
+        platform_users: PlatformUsers,
     ) -> Self {
         Self {
             pool,
             blobs,
             registry,
             limits,
+            platform_users,
         }
     }
 
@@ -198,6 +205,8 @@ impl InitialImportWorker {
             detected_schema: &detected,
             evidence: &evidence,
         })?;
+        let artifacts =
+            crate::ArtifactReconciler::new(&self.blobs).reconcile(std::slice::from_ref(&parsed))?;
         let completeness = crate::ArchiveCompletenessReport::from_ingest(
             input.archive_id.to_string(),
             &parsed,
@@ -231,6 +240,7 @@ impl InitialImportWorker {
             evidence_ref,
             completeness,
             detected,
+            artifacts,
         })
     }
 
@@ -290,8 +300,9 @@ impl InitialImportWorker {
             .bind(decode_hex(&prepared.evidence_ref.digest_hex).ok_or(ReparseError::Conflict)?)
             .bind(i64::try_from(prepared.evidence_ref.length_bytes).map_err(|_| ReparseError::Conflict)?).execute(&mut *tx).await?;
         persist_initial_projection(&mut tx, &prepared.plan).await?;
+        persist_artifacts(&mut tx, &prepared.plan, &prepared.artifacts).await?;
         sqlx::query("insert into claude_archive.completeness_reports (report_id,run_id,status,discovered_counts,missing_assets,unknown_variants,warnings) values ($1,$2,$3,$4,$5,$6,$7) on conflict (run_id) do nothing")
-            .bind(Uuid::now_v7()).bind(run_id).bind(status).bind(counts)
+            .bind(Uuid::now_v7()).bind(run_id).bind(status).bind(&counts)
             .bind(i32::try_from(prepared.completeness.counts.missing_knowledge_files).unwrap_or(i32::MAX))
             .bind(i32::try_from(prepared.completeness.counts.unknown_variants).unwrap_or(i32::MAX))
             .bind(&warnings).execute(&mut *tx).await?;
@@ -299,6 +310,27 @@ impl InitialImportWorker {
             .bind(prepared.plan.export_id).bind(prepared.detected.identifier()).bind(prepared.plan.target.version()).execute(&mut *tx).await?;
         sqlx::query("update claude_archive.import_runs set state=$2,warnings=$3,finished_at=now() where run_id=$1")
             .bind(run_id).bind(terminal_state).bind(warnings).execute(&mut *tx).await?;
+        ImportProjection {
+            users: &self.platform_users,
+            account_id: prepared.plan.tenant_id,
+            export_id: prepared.plan.export_id,
+            archive_id,
+            raw: &prepared.plan.raw,
+            parser: &prepared.plan.target,
+            report: ReportView {
+                status: status.to_owned(),
+                counts,
+                warnings: prepared
+                    .completeness
+                    .warnings
+                    .iter()
+                    .map(|warning| warning.code.clone())
+                    .collect(),
+            },
+            head_always: true,
+        }
+        .publish(&mut tx)
+        .await?;
         enqueue_reports_in(
             &mut tx,
             run_id,
@@ -319,6 +351,12 @@ const fn is_permanent_import_error(error: &ReparseError) -> bool {
             | ReparseError::Intake(_)
             | ReparseError::Parser(_)
             | ReparseError::Encode(_)
+            | ReparseError::Artifact(
+                crate::ArtifactReconciliationError::IdentityConflict { .. }
+                    | crate::ArtifactReconciliationError::VersionConflict { .. }
+                    | crate::ArtifactReconciliationError::MissingPredecessor { .. }
+                    | crate::ArtifactReconciliationError::VersionCycle { .. },
+            )
             | ReparseError::Blob(
                 crate::StoreError::Collision { .. }
                     | crate::StoreError::Mismatch { .. }
@@ -390,11 +428,16 @@ fn summary_from(report: &crate::ArchiveCompletenessReport) -> ImportSummary {
         conversations: u32::try_from(report.counts.conversations).unwrap_or(u32::MAX),
         messages: u32::try_from(report.counts.messages).unwrap_or(u32::MAX),
         assets: u32::try_from(report.counts.verified_knowledge_files).unwrap_or(u32::MAX),
-        gaps: u32::try_from(report.counts.missing_knowledge_files + report.counts.unknown_variants)
-            .unwrap_or(u32::MAX)
-            .max(u32::from(
-                report.status != crate::CompletenessStatus::Complete,
-            )),
+        gaps: u32::try_from(
+            gaps_for(GapInput {
+                complete: report.status == crate::CompletenessStatus::Complete,
+                unknown_variants: report.counts.unknown_variants,
+                missing_files: report.counts.missing_knowledge_files,
+                quarantined_files: report.counts.quarantined_knowledge_files,
+            })
+            .len(),
+        )
+        .unwrap_or(u32::MAX),
         warnings: u32::try_from(report.warnings.len()).unwrap_or(u32::MAX),
     }
 }
@@ -448,9 +491,8 @@ async fn load_summary(pool: &PgPool, run_id: Uuid) -> Result<ImportSummary, Repa
         "failed_validation" => AiArchiveCompleteness::FailedValidation,
         _ => AiArchiveCompleteness::StructurallyPartial,
     };
-    let gaps = count("missing_knowledge_files")
-        .saturating_add(count("unknown_variants"))
-        .max(u32::from(completeness != AiArchiveCompleteness::Complete));
+    let gaps =
+        u32::try_from(gaps_for(GapInput::from_counts(&status, &counts)).len()).unwrap_or(u32::MAX);
     Ok(ImportSummary {
         completeness,
         conversations: count("conversations"),
@@ -579,8 +621,17 @@ async fn persist_initial_projection(
     plan: &ReparsePlan,
 ) -> Result<(), ReparseError> {
     for project in &plan.parsed.projects {
-        let project_id: Uuid = sqlx::query_scalar("insert into claude_archive.projects (project_id,account_id,external_project_id,title,upstream_state) values ($1,$2,$3,$4,'present') on conflict (account_id,external_project_id) do update set title=excluded.title,updated_at=now() returning project_id")
-            .bind(Uuid::now_v7()).bind(plan.tenant_id).bind(&project.external_id).bind(&project.name).fetch_one(&mut **tx).await?;
+        let instructions = plan
+            .parsed
+            .project_instructions
+            .iter()
+            .find(|instruction| instruction.project_external_id == project.external_id)
+            .map(|instruction| instruction.text.as_str());
+        let project_id: Uuid = sqlx::query_scalar("insert into claude_archive.projects (project_id,account_id,external_project_id,title,description,instructions,parser_name,parser_version,upstream_state) values ($1,$2,$3,$4,$5,$6,$7,$8,'present') on conflict (account_id,external_project_id) do update set title=excluded.title,description=excluded.description,instructions=excluded.instructions,parser_name=excluded.parser_name,parser_version=excluded.parser_version,updated_at=now() returning project_id")
+            .bind(Uuid::now_v7()).bind(plan.tenant_id).bind(&project.external_id).bind(&project.name)
+            .bind(&project.description).bind(instructions)
+            .bind(&project.parser.parser_identifier).bind(&project.parser.parser_version)
+            .fetch_one(&mut **tx).await?;
         sqlx::query("insert into claude_archive.export_observations (export_id,subject_kind,subject_id) values ($1,'project',$2) on conflict do nothing")
             .bind(plan.export_id).bind(project_id).execute(&mut **tx).await?;
         for source in plan
@@ -599,13 +650,21 @@ async fn persist_initial_projection(
         let conversation_id: Uuid = sqlx::query_scalar("select conversation_id from claude_archive.conversations where account_id=$1 and external_conversation_id=$2")
             .bind(plan.tenant_id).bind(&conversation.external_id).fetch_one(&mut **tx).await?;
         let mut message_ids = BTreeMap::new();
-        for message in &conversation.messages {
+        for (ordinal, message) in conversation.messages.iter().enumerate() {
             let role = match message.role.as_str() {
                 "user" | "assistant" | "system" | "tool" | "internal" => message.role.as_str(),
                 _ => "unknown",
             };
-            let message_id: Uuid = sqlx::query_scalar("insert into claude_archive.messages (message_id,conversation_id,external_message_id,role,model) values ($1,$2,$3,$4,$5) on conflict (conversation_id,external_message_id) do update set role=excluded.role,model=excluded.model,last_seen_at=now() returning message_id")
-                .bind(Uuid::now_v7()).bind(conversation_id).bind(&message.external_id).bind(role).bind(&message.model).fetch_one(&mut **tx).await?;
+            let created = message
+                .created_at
+                .as_deref()
+                .and_then(|value| WireTimestamp::parse(value).ok())
+                .map(|instant| instant.to_string());
+            let message_id: Uuid = sqlx::query_scalar("insert into claude_archive.messages (message_id,conversation_id,external_message_id,role,model,provider_created_at,source_ordinal,parser_name,parser_version) values ($1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9) on conflict (conversation_id,external_message_id) do update set role=excluded.role,model=excluded.model,last_seen_at=now() returning message_id")
+                .bind(Uuid::now_v7()).bind(conversation_id).bind(&message.external_id).bind(role).bind(&message.model)
+                .bind(created).bind(i32::try_from(ordinal).unwrap_or(i32::MAX))
+                .bind(&message.parser.parser_identifier).bind(&message.parser.parser_version)
+                .fetch_one(&mut **tx).await?;
             message_ids.insert(message.external_id.clone(), message_id);
             sqlx::query("insert into claude_archive.export_observations (export_id,subject_kind,subject_id) values ($1,'message',$2) on conflict do nothing")
                 .bind(plan.export_id).bind(message_id).execute(&mut **tx).await?;

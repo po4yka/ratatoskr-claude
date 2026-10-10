@@ -14,17 +14,20 @@ pub mod artifact;
 pub mod blob_store;
 pub mod completeness;
 pub mod config;
+mod contract_projection;
 pub mod database;
 pub mod events;
 pub mod export_projection;
 pub mod external_reference;
 pub mod fixture_admission;
+mod import_artifacts;
 pub mod import_state;
 mod initial_import;
 pub mod knowledge_link;
 pub mod operation_outbox;
 pub mod parser_migration;
 pub mod parser_registry;
+pub mod platform_users;
 pub mod portable_artifact;
 pub mod portable_export;
 pub mod privacy_deletion;
@@ -74,6 +77,7 @@ pub use parser_registry::{
     ParserExecutionInput, ParserExecutor, ParserIdentity, ParserRegistry, ParserRegistryError,
     ParserSelectionError,
 };
+pub use platform_users::PlatformUsers;
 pub use portable_artifact::{
     ArtifactPortableError, ArtifactPortableExporter, PortableArtifactRepresentation,
 };

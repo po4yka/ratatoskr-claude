@@ -75,6 +75,7 @@ fn initial_worker(
             max_total_extracted_bytes: 2_097_152,
             max_compression_ratio: 100,
         },
+        ratatoskr_claude_archive::PlatformUsers::default(),
     )
 }
 
