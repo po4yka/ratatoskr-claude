@@ -31,6 +31,7 @@ use uuid::Uuid;
 const PLATFORM_USER: &str = "018f0000-0000-7000-8000-0000000000c1";
 const SCHEMA: &str = "claude-export-2026-08-synthetic";
 const PARSER: &str = "claude-synthetic-consumer-export";
+const DISCOVERED: &str = "discovered-by-reparse";
 
 fn limits() -> Limits {
     Limits {
@@ -83,6 +84,8 @@ fn zip_with_artifacts(artifacts: serde_json::Value) -> Vec<u8> {
 struct NewerParser {
     version: &'static str,
     retitle: bool,
+    /// Also finds one conversation the first parser missed, a copy of the first one.
+    discovers: bool,
 }
 
 impl ParserExecutor for NewerParser {
@@ -100,6 +103,15 @@ impl ParserExecutor for NewerParser {
                 conversation.title = format!("{} (revised)", conversation.title);
             }
         }
+        if self.discovers {
+            let mut found = parsed
+                .conversations
+                .first()
+                .cloned()
+                .ok_or(ParserExecutionError::Failed)?;
+            DISCOVERED.clone_into(&mut found.external_id);
+            parsed.conversations.push(found);
+        }
         Ok(parsed)
     }
 }
@@ -112,7 +124,11 @@ fn import_registry() -> ParserRegistry {
 /// The service parser plus two newer releases of it, the targets of a reparse.
 fn reparse_registry() -> ParserRegistry {
     let mut registry = import_registry();
-    for (version, retitle) in [("2026-09-01", false), ("2026-09-02", true)] {
+    for (version, retitle, discovers) in [
+        ("2026-09-01", false, false),
+        ("2026-09-02", true, false),
+        ("2026-09-03", false, true),
+    ] {
         registry
             .register_compiled(
                 ParserDescriptor::new(
@@ -122,7 +138,11 @@ fn reparse_registry() -> ParserRegistry {
                     vec![SCHEMA.to_owned()],
                     vec![ParserCapability::Conversations],
                 ),
-                Arc::new(NewerParser { version, retitle }),
+                Arc::new(NewerParser {
+                    version,
+                    retitle,
+                    discovers,
+                }),
             )
             .expect("the newer parser versions are distinct");
     }
@@ -647,4 +667,70 @@ async fn a_conversation_that_cannot_be_projected_is_named_as_a_gap_on_the_repars
         .expect("the omitted conversation is named as a gap");
     assert_eq!(gap.affected_count, Some(1));
     assert!(!head.completeness_report.completeness.is_complete());
+}
+
+/// A conversation a newer parser finds is persisted whole, so the fact that announces it carries
+/// its messages instead of an empty list with a digest of nothing.
+#[tokio::test]
+async fn a_conversation_a_reparse_adds_is_announced_with_its_messages() {
+    let imported = import_synthetic_export("projection-reparse-adds", true).await;
+    publish_all(&imported.db.database).await;
+    let engine = ReparseEngine::new(
+        imported.db.database.pool().clone(),
+        imported.store.clone(),
+        Arc::new(reparse_registry()),
+        limits(),
+        PlatformUsers::new(&[(
+            Uuid::parse_str(PLATFORM_USER).expect("user UUID"),
+            imported.account,
+        )]),
+    );
+    let discovering = engine
+        .plan(
+            imported.account,
+            imported.archive,
+            ParserIdentity::new(PARSER, "2026-09-03"),
+        )
+        .await
+        .expect("the discovering reparse is planned");
+    engine
+        .apply(&discovering)
+        .await
+        .expect("the discovering reparse applies");
+
+    let emitted = facts(&imported.db.database).await;
+    let stored_messages: i64 = sqlx::query_scalar(
+        "select count(*) from claude_archive.messages m
+         join claude_archive.conversations c on c.conversation_id = m.conversation_id
+         where c.external_conversation_id = $1",
+    )
+    .bind(DISCOVERED)
+    .fetch_one(imported.db.database.pool())
+    .await
+    .expect("the message count is readable");
+    remove(&imported.root);
+    imported.db.cleanup().await.expect("cleanup succeeds");
+
+    let added: Vec<AiConversationAdded> = payload(&emitted, "ai_archive.conversation.added.v1");
+    let discovered = added
+        .iter()
+        .find(|fact| {
+            fact.conversation
+                .external_conversation_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == DISCOVERED)
+        })
+        .expect("the discovered conversation is announced");
+    discovered
+        .validate()
+        .expect("the announced conversation agrees with its content digest");
+    assert_eq!(
+        stored_messages, 2,
+        "the reparse persists the messages of the conversation it adds"
+    );
+    assert_eq!(
+        discovered.conversation.messages.len(),
+        2,
+        "the announced conversation carries its messages"
+    );
 }

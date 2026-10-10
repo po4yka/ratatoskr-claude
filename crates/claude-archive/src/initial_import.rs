@@ -1,6 +1,5 @@
 //! Restart-safe initial Claude archive import and terminal operation reporting.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ratatoskr_ai_archive_contracts::{
@@ -660,58 +659,6 @@ async fn persist_initial_projection(
         }
     }
     apply_conversations(tx, plan).await?;
-    for conversation in &plan.parsed.conversations {
-        let conversation_id: Uuid = sqlx::query_scalar("select conversation_id from claude_archive.conversations where account_id=$1 and external_conversation_id=$2")
-            .bind(plan.tenant_id).bind(&conversation.external_id).fetch_one(&mut **tx).await?;
-        let mut message_ids = BTreeMap::new();
-        for (ordinal, message) in conversation.messages.iter().enumerate() {
-            let role = match message.role.as_str() {
-                "user" | "assistant" | "system" | "tool" | "internal" => message.role.as_str(),
-                _ => "unknown",
-            };
-            let created = message
-                .created_at
-                .as_deref()
-                .and_then(|value| WireTimestamp::parse(value).ok())
-                .map(|instant| instant.to_string());
-            let message_id: Uuid = sqlx::query_scalar("insert into claude_archive.messages (message_id,conversation_id,external_message_id,role,model,provider_created_at,source_ordinal,parser_name,parser_version) values ($1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9) on conflict (conversation_id,external_message_id) do update set role=excluded.role,model=excluded.model,last_seen_at=now() returning message_id")
-                .bind(Uuid::now_v7()).bind(conversation_id).bind(&message.external_id).bind(role).bind(&message.model)
-                .bind(created).bind(i32::try_from(ordinal).unwrap_or(i32::MAX))
-                .bind(&message.parser.parser_identifier).bind(&message.parser.parser_version)
-                .fetch_one(&mut **tx).await?;
-            message_ids.insert(message.external_id.clone(), message_id);
-            sqlx::query("insert into claude_archive.export_observations (export_id,subject_kind,subject_id) values ($1,'message',$2) on conflict do nothing")
-                .bind(plan.export_id).bind(message_id).execute(&mut **tx).await?;
-            for (index, part) in message.content.iter().enumerate() {
-                let (kind, body, payload) = match part {
-                    crate::ContentPart::Text { text, .. } => ("text", Some(text.as_str()), None),
-                    crate::ContentPart::Markdown { markdown, .. } => {
-                        ("markdown", Some(markdown.as_str()), None)
-                    }
-                    crate::ContentPart::Unknown { raw, .. } => ("unknown", None, Some(raw)),
-                };
-                sqlx::query("insert into claude_archive.content_parts (content_part_id,message_id,part_index,part_kind,body,payload) values ($1,$2,$3,$4,$5,$6) on conflict (message_id,part_index) do nothing")
-                    .bind(Uuid::now_v7()).bind(message_id).bind(i32::try_from(index).unwrap_or(i32::MAX)).bind(kind).bind(body).bind(payload).execute(&mut **tx).await?;
-            }
-        }
-        for message in &conversation.messages {
-            if let (Some(message_id), Some(parent_id)) = (
-                message_ids.get(&message.external_id),
-                message
-                    .parent_external_id
-                    .as_ref()
-                    .and_then(|parent| message_ids.get(parent)),
-            ) {
-                sqlx::query(
-                    "update claude_archive.messages set parent_message_id=$2 where message_id=$1",
-                )
-                .bind(message_id)
-                .bind(parent_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-    }
     Ok(())
 }
 

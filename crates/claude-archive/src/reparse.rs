@@ -485,9 +485,71 @@ pub(crate) async fn apply_conversations(
             change.kind,
             ReparseChangeKind::Added | ReparseChangeKind::Changed
         ) {
+            persist_messages(tx, plan.export_id, subject_id, parsed).await?;
             let revision_index:i64=sqlx::query_scalar("select coalesce(max(revision_index),-1)+1 from claude_archive.revisions where subject_kind='conversation' and subject_id=$1").bind(subject_id).fetch_one(&mut **tx).await?;
             let raw_record = serde_json::json!({"external_id":parsed.external_id,"title":parsed.title,"parser":plan.report.target_parser});
             sqlx::query("insert into claude_archive.revisions (revision_id,subject_kind,subject_id,export_id,revision_index,raw_record) values ($1,'conversation',$2,$3,$4,$5)").bind(Uuid::now_v7()).bind(subject_id).bind(plan.export_id).bind(revision_index).bind(raw_record).execute(&mut **tx).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Persists the messages and parts of one parsed conversation and links each message to its parent.
+///
+/// The first import and a reparse both call it, so a conversation announced downstream always has
+/// the messages the fact carries. Every write is an upsert keyed by the provider ids.
+async fn persist_messages(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    export_id: Uuid,
+    conversation_id: Uuid,
+    conversation: &crate::Conversation,
+) -> Result<(), ReparseError> {
+    let mut message_ids = BTreeMap::new();
+    for (ordinal, message) in conversation.messages.iter().enumerate() {
+        let role = match message.role.as_str() {
+            "user" | "assistant" | "system" | "tool" | "internal" => message.role.as_str(),
+            _ => "unknown",
+        };
+        let created = message
+            .created_at
+            .as_deref()
+            .and_then(|value| WireTimestamp::parse(value).ok())
+            .map(|instant| instant.to_string());
+        let message_id: Uuid = sqlx::query_scalar("insert into claude_archive.messages (message_id,conversation_id,external_message_id,role,model,provider_created_at,source_ordinal,parser_name,parser_version) values ($1,$2,$3,$4,$5,$6::timestamptz,$7,$8,$9) on conflict (conversation_id,external_message_id) do update set role=excluded.role,model=excluded.model,last_seen_at=now() returning message_id")
+            .bind(Uuid::now_v7()).bind(conversation_id).bind(&message.external_id).bind(role).bind(&message.model)
+            .bind(created).bind(i32::try_from(ordinal).unwrap_or(i32::MAX))
+            .bind(&message.parser.parser_identifier).bind(&message.parser.parser_version)
+            .fetch_one(&mut **tx).await?;
+        message_ids.insert(message.external_id.clone(), message_id);
+        sqlx::query("insert into claude_archive.export_observations (export_id,subject_kind,subject_id) values ($1,'message',$2) on conflict do nothing")
+            .bind(export_id).bind(message_id).execute(&mut **tx).await?;
+        for (index, part) in message.content.iter().enumerate() {
+            let (kind, body, payload) = match part {
+                crate::ContentPart::Text { text, .. } => ("text", Some(text.as_str()), None),
+                crate::ContentPart::Markdown { markdown, .. } => {
+                    ("markdown", Some(markdown.as_str()), None)
+                }
+                crate::ContentPart::Unknown { raw, .. } => ("unknown", None, Some(raw)),
+            };
+            sqlx::query("insert into claude_archive.content_parts (content_part_id,message_id,part_index,part_kind,body,payload) values ($1,$2,$3,$4,$5,$6) on conflict (message_id,part_index) do nothing")
+                .bind(Uuid::now_v7()).bind(message_id).bind(i32::try_from(index).unwrap_or(i32::MAX)).bind(kind).bind(body).bind(payload).execute(&mut **tx).await?;
+        }
+    }
+    for message in &conversation.messages {
+        if let (Some(message_id), Some(parent_id)) = (
+            message_ids.get(&message.external_id),
+            message
+                .parent_external_id
+                .as_ref()
+                .and_then(|parent| message_ids.get(parent)),
+        ) {
+            sqlx::query(
+                "update claude_archive.messages set parent_message_id=$2 where message_id=$1",
+            )
+            .bind(message_id)
+            .bind(parent_id)
+            .execute(&mut **tx)
+            .await?;
         }
     }
     Ok(())
