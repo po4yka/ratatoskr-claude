@@ -428,3 +428,11 @@ Planned: `ratatoskr-workspace` will pin this repository with compatible AI-archi
 ## Project status
 
 The process foundation (configuration, telemetry, operator health, typed errors, content-addressed blob storage, owned `claude_archive` schema) is implemented and gated by CI; `schema.sql` is the single editable definition of that first version. Authenticated tenant-scoped archive receipt, capped streaming hashing, write-once raw storage with explicit duplicate outcomes, and the durable import-run state machine are implemented. Safe container inspection, schema detection, parsers, completeness reporting, the event machinery, Compliance connectors, and portable export generation do not exist yet; the sections above describe the intended Claude archive architecture. `DEVELOPMENT.md` records the exact local and CI gate commands.
+
+### Platform receipt, archive facts and privacy deletion
+
+The service answers the Platform archive receipt on `POST /v1/ai-archives/receipt` and advertises it on the unauthenticated `GET /v1/capabilities`; every refusal is a JSON `ErrorEnvelope`, because Edge discards any other body. The operator plane defaults to `127.0.0.1:9086`.
+
+A completed import or an applied reparse enqueues, in the transaction that persists it, an `ai_archive.archive.imported.v1` fact and the project, conversation and Artifact facts it changed, owned by the Platform user that `RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` maps to the archive account. One pump publishes every archive event type, in order, and marks a row published only after the broker acknowledged it. An import that is not complete is reported as `partially_succeeded` with the `ai_archive.import.incomplete` warning.
+
+Privacy deletion removes the scope rows and every dependent in one transaction, then erases the bytes no remaining row references, then completes the request. It enqueues an `ai_archive.subject.tombstoned.v1` envelope with reason `user_requested` for each deleted archive and each Knowledge-linked conversation or Artifact. These behaviours are verified against the synthetic export schema only; no claim is made about a real Claude export.

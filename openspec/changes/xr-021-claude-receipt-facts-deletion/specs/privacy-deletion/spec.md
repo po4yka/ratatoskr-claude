@@ -1,3 +1,19 @@
+## MODIFIED Requirements
+
+### Requirement: Finalization couples database erasure audit and downstream removal
+
+A deletion SHALL become terminally completed only after every exclusively owned blob in its inventory is absent and every shared blob is proven reachable from the rows that remain. The row-removal transaction SHALL remove the selected normalized and provenance records and enqueue the authoritative `ai_archive.subject.tombstoned.v1` outbox facts with `reason = "user_requested"`. The completion transaction SHALL append an immutable content-free audit outcome and drop the request items. If either transaction fails, none of its database effects SHALL commit and the durable request SHALL remain resumable.
+
+#### Scenario: Final transaction failure is atomic
+
+- **WHEN** persistence fails while the rows of a deletion are being removed
+- **THEN** normalized row removal, provenance removal, completion audit and Knowledge tombstone outbox insertion are all absent, the durable request remains `planned`, and a retry can run from the recorded inventory
+
+#### Scenario: Completed deletion has matching audit and outbox evidence
+
+- **WHEN** a deletion completes
+- **THEN** its completion audit category counts match the executed inventory and every no-longer-evidenced downstream subject has exactly one replay-safe tombstone outbox fact
+
 ## ADDED Requirements
 
 ### Requirement: Deletion removes rows first, bytes second, and completes last

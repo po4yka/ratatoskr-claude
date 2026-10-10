@@ -4,6 +4,10 @@ Status: Accepted (implementation plan items 1–6 complete). Last reviewed: 2026
 
 The service scaffold exists: typed strict configuration, structured telemetry, operator health routes, typed errors, a content-addressed BlobStore adapter with capped streaming ingest, and the first-version `claude_archive` schema applied at startup. Authenticated tenant-scoped archive receipt exists: claims verify against known accounts/organizations before storage, archives hash and count while streaming under `RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES`, raw bytes land write-once, re-delivered digests report an explicit duplicate outcome, and each accepted receipt starts a durable crash-resumable import run driven by guarded state transitions. Plan item 3 adds bounded, non-executing ZIP structure inspection; direct bounded extraction to BlobStore with raw-digest provenance; conservative active-media quarantine; and an exact-match versioned parser-declaration registry. Plan item 4 adds the first exact consumer-export parser for the documented synthetic schema, with projects, conversations, messages, ordered text/Markdown parts, parser stamps, and inert unknown evidence covered by committed golden tests. Plan item 6 adds first-class synthetic Artifacts, immutable version-chain reconciliation across repeated observations, verified-or-quarantined BlobRef payload retention, and a deterministic safe portable Artifact representation. It renders only verified `text/plain` and `text/markdown` bytes; all other Artifact types remain normalized JSON evidence with an explicit `unrenderable` reason. Real-export validation remains a required protected-fixture follow-up; schema detection beyond the declared synthetic identifier, Compliance adapter, and complete project-export writer are not implemented yet.
 
+## Facts and deletion
+
+An initial import and every reparse that changes a row enqueue the `ai_archive.*` facts for it through `crates/claude-archive/src/contract_projection.rs`, built from the persisted rows and owned by the Platform user of the account. Privacy deletion is rows first, bytes second, complete last: `privacy_deletion/rows.rs` removes the scope rows and their dependents in one transaction and records `rows_removed_at`, `execution.rs` erases the bytes and completes the request, and `tombstones.rs` writes the contract tombstones. A test queries `pg_constraint` and fails when a foreign key into a deletion root is neither cascading nor listed in `HANDLED_REFERENCES`.
+
 ## Project Knowledge and completeness
 
 Plan item 5 promotes observed project instructions to first-class records and maps exact
@@ -63,17 +67,38 @@ openspec validate --archived
 ```bash
 docker compose up -d
 cargo run -p ratatoskr-claude-archive-service
-# operator plane on 127.0.0.1:9084: /health/live /health/ready /metrics /version
+# operator plane on 127.0.0.1:9086: /health/live /health/ready /metrics /version
 ```
 
 Configuration comes from `RATATOSKR__*` environment variables; required:
 `RATATOSKR__STORAGE__BLOB_ROOT` and `RATATOSKR__STORAGE__DATABASE_URL`. Defaults: operator listener
-`127.0.0.1:9084`, log filter `info`, 8 database connections, 5 s acquire timeout, 10 s shutdown
+`127.0.0.1:9086`, log filter `info`, 8 database connections, 5 s acquire timeout, 10 s shutdown
 bound, and a 10 GiB maximum accepted archive size (`RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES`).
 `<binary> check-config` validates and prints the redacted effective configuration.
 
 Tests use disposable databases created from `schema.sql`; override their location with
 `CLAUDE_ARCHIVE_TEST_DATABASE_URL`. The suite never skips when the server is missing — it fails.
+
+The archive event pump is proven against a real JetStream, never a fake: `CLAUDE_ARCHIVE_TEST_NATS_URL` must name a
+`nats-server -js` and the pump tests fail, they do not skip, when it is unset. CI starts the broker in the
+`Start disposable JetStream` step of `ci.yml`; locally `docker compose up -d postgres nats` starts it on
+`127.0.0.1:4238`, so the variable is `nats://127.0.0.1:4238`.
+
+## Platform receipt listener
+
+The service router serves the operator plane and the private Platform receipt on one listener, so the listener
+address is both. `POST /v1/ai-archives/receipt` takes the Edge-minted claims named by
+`ratatoskr_ai_archive_contracts::platform_receipt` and answers `202 Accepted` with an empty body. Every other
+answer is `application/json` carrying an `ErrorEnvelope` (`claude.auth.unauthenticated` 401,
+`claude.request.invalid` 400, `claude.request.too_large` 413, `claude.request.method_not_allowed` 405,
+`claude.server.internal` 500), because Edge replaces any other body with `edge.upstream_invalid_response`.
+`GET /v1/capabilities` answers the unauthenticated capability document `{"service":"claude","capabilities":
+["ai_archive.receipt"]}` while the receipt route is mounted. XR-021 CONTRACTS.md S05 allocates 8097 to the
+receipt and 9086 to the operator plane; this process serves both from the one configured address, so a
+deployment that must expose them on different ports needs a second listener, which does not exist yet.
+`RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` maps each Platform user to its archive account; the same mapping
+decides the Platform owner of every `ai_archive.*` fact and every deletion tombstone, and an account without a
+mapping emits no fact.
 
 ## Workflow
 
