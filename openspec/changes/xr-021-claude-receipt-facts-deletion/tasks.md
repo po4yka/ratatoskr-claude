@@ -58,3 +58,14 @@
 - [x] 10.8 Regression guards for behaviour that already holds, so there is no implementation step: `closure_cases.rs` and `commit_cases.rs` assert that the tombstone envelope carries the recorded request correlation id, that a non-reference correlation falls back to `privacy_request:<request id>`, that no surviving row references a missing blob after the row phase and after the resume, and that the census fails on a stale handled entry. The correlation, fallback and census guards are each shown to fail against a deliberate mutation; the dangling-reference guard only observes an invariant the implementation already keeps.
 - [x] 10.9 Documentation, so there is no test to fail first: the unmapped-account refusal, the correlation fallback, the duplicate-delivery report limit and the identity rule in `DEVELOPMENT.md` and `design.md`.
 - [x] 10.10 Run the full gate again.
+
+## 11. Second review fixes
+
+- [x] 11.1 RED: `crates/claude-archive/tests/projection_subjects.rs` adds `the_same_artifact_id_in_two_tenants_is_added_for_each` and `the_same_artifact_id_in_two_conversations_is_added_for_each_and_stays_quiet_on_reimport`; the first fails because tenant B's first Artifact is emitted as `artifact.updated` against tenant A's fact, the second because the second conversation's Artifact is compared with the first's.
+- [x] 11.2 GREEN: scope `latest_envelope` to the owner's `tenant_ref` and, for an Artifact, to its conversation and project refs; a message-scoped Artifact carries its message's conversation.
+- [x] 11.3 RED: `projection_subjects.rs` adds `a_project_the_contract_cannot_name_is_a_gap_and_does_not_fail_the_import`, which fails because the import returns an error.
+- [x] 11.4 GREEN: count such a project in `Omitted` and continue.
+- [x] 11.5 RED: `crates/claude-archive/tests/privacy_deletion/tombstone_cases.rs` adds the unlinked conversation, project and tenant-scope cases and the retained-conversation case; the first three fail because only archives and Knowledge-linked subjects are tombstoned.
+- [x] 11.6 GREEN: plan an `emit_tombstone` item for every removed conversation and project, read the subjects before the observations are deleted, and tombstone them under the archive that observed them; `completed_deletion_replay_returns_original_report` now expects the conversation tombstone beside the archive tombstone, and the inventory expectations include the new items.
+- [x] 11.7 Documentation, so there is no test to fail first: `design.md`, `DEVELOPMENT.md` and `README.md`.
+- [x] 11.8 Run the full gate again against PostgreSQL and a JetStream-enabled `nats-server`.
