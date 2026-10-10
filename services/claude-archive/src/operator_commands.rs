@@ -10,8 +10,9 @@ use ratatoskr_claude_archive::portable_export::{
     PortableKnowledgeSource, PortableProject, PortableProvenance,
 };
 use ratatoskr_claude_archive::privacy_deletion::{
-    ConversationDeletionPlanRequest, PrivacyDeletionExecutor, PrivacyDeletionPlanner,
-    RawExportDeletionPlanRequest, ResolvedDeletionBlob, TenantDeletionPlanRequest,
+    ConversationDeletionPlanRequest, PrivacyDeletionError, PrivacyDeletionExecutor,
+    PrivacyDeletionPlanner, RawExportDeletionPlanRequest, ResolvedDeletionBlob,
+    TenantDeletionPlanRequest,
 };
 use ratatoskr_claude_archive::{
     BlobRef, BlobStore, Config, Database, DigestAlgorithm, MediaType, ParserIdentity,
@@ -53,8 +54,8 @@ pub struct OperatorContext {
     blobs: BlobStore,
     registry: Arc<ParserRegistry>,
     limits: ratatoskr_claude_archive::Limits,
-}
     platform_users: PlatformUsers,
+}
 
 impl OperatorContext {
     /// Opens configured operator dependencies and applies the current schema.
@@ -93,8 +94,8 @@ impl OperatorContext {
             blobs,
             registry: Arc::new(registry),
             limits: config.limits,
-        })
             platform_users: PlatformUsers::new(&config.receipt.platform_accounts),
+        })
     }
 
     /// Executes deterministic portable export from tenant-scoped database state.
@@ -130,10 +131,12 @@ impl OperatorContext {
                 error_code: "not_found".to_owned(),
             };
         };
+        // A deletion is recorded under the Platform user when the account is mapped, because that
+        // reference names the owner of the tombstones it writes; an unmapped account keeps the
+        // supplied reference and is refused at planning if it has anything to tombstone.
+        let tenant_ref = self.deletion_tenant_ref(account_id, &command.tenant);
         let request_id =
-            match existing_request(self.database.pool(), &command.tenant, &command.request_key)
-                .await
-            {
+            match existing_request(self.database.pool(), &tenant_ref, &command.request_key).await {
                 Ok(Some(id)) => id,
                 Ok(None) => Uuid::now_v7(),
                 Err(()) => {
@@ -148,7 +151,7 @@ impl OperatorContext {
             PrivacyDeletionScope::Tenant => {
                 planner
                     .plan_tenant(&TenantDeletionPlanRequest {
-                        tenant_ref: command.tenant.clone(),
+                        tenant_ref: tenant_ref.clone(),
                         account_id,
                         request_id,
                         request_key: command.request_key.clone(),
@@ -159,7 +162,7 @@ impl OperatorContext {
             PrivacyDeletionScope::Export => {
                 planner
                     .plan_raw_export(&RawExportDeletionPlanRequest {
-                        tenant_ref: command.tenant.clone(),
+                        tenant_ref: tenant_ref.clone(),
                         account_id,
                         request_id,
                         request_key: command.request_key.clone(),
@@ -171,7 +174,7 @@ impl OperatorContext {
             PrivacyDeletionScope::Conversation => {
                 planner
                     .plan_conversation(&ConversationDeletionPlanRequest {
-                        tenant_ref: command.tenant.clone(),
+                        tenant_ref: tenant_ref.clone(),
                         account_id,
                         request_id,
                         request_key: command.request_key.clone(),
@@ -186,10 +189,20 @@ impl OperatorContext {
                 request_id: inventory.request_id.to_string(),
                 item_count: u64::try_from(inventory.items.len()).unwrap_or(u64::MAX),
             },
+            Err(PrivacyDeletionError::Conflict) => PrivacyDeletePlanExecution::Failed {
+                error_code: "conflict".to_owned(),
+            },
             Err(_) => PrivacyDeletePlanExecution::Failed {
                 error_code: "not_found".to_owned(),
             },
         }
+    }
+
+    /// The tenant reference a deletion of `account` is recorded under.
+    fn deletion_tenant_ref(&self, account: Uuid, supplied: &str) -> String {
+        self.platform_users
+            .tenant_ref_of(account)
+            .unwrap_or_else(|| supplied.to_owned())
     }
 
     /// Physically erases exact unshared blobs and atomically finalizes deletion.
@@ -203,18 +216,24 @@ impl OperatorContext {
         .bind(command.request_id)
         .fetch_optional(self.database.pool())
         .await;
-        if !matches!(owned,Ok(Some(ref tenant)) if tenant==&command.tenant) {
+        let tenant_ref = Uuid::parse_str(&command.tenant).map_or_else(
+            |_| command.tenant.clone(),
+            |account| self.deletion_tenant_ref(account, &command.tenant),
+        );
+        if !matches!(owned,Ok(Some(ref tenant)) if tenant==&tenant_ref) {
             return PrivacyDeleteExecuteExecution::Failed {
                 error_code: "not_found".to_owned(),
             };
         }
-        let Ok(resolved) = deletion_blobs(self.database.pool(), command.request_id).await else {
+        let Ok(resolved) =
+            deletion_blobs(self.database.pool(), &self.blobs, command.request_id).await
+        else {
             return PrivacyDeleteExecuteExecution::Failed {
                 error_code: "operation_failed".to_owned(),
             };
         };
         match PrivacyDeletionExecutor::new(self.database.pool().clone())
-            .finalize_with_blob_store(command.request_id, &self.blobs, &resolved)
+            .finalize_with_blob_store(command.request_id, &self.blobs, &resolved, None)
             .await
         {
             Ok(report) => PrivacyDeleteExecuteExecution::Completed {
@@ -335,6 +354,7 @@ impl OperatorContext {
             self.blobs.clone(),
             Arc::clone(&self.registry),
             self.limits.clone(),
+            self.platform_users.clone(),
         )
     }
 
@@ -354,25 +374,39 @@ fn parse_target(command: &PrivacyDeletePlanCommand) -> Uuid {
         .unwrap_or(Uuid::nil())
 }
 async fn existing_request(pool: &PgPool, tenant: &str, key: &str) -> Result<Option<Uuid>, ()> {
-            self.platform_users.clone(),
     sqlx::query_scalar("select request_id from claude_archive.privacy_deletion_requests where tenant_ref=$1 and request_key=$2").bind(tenant).bind(key).fetch_optional(pool).await.map_err(|_|())
 }
 
-async fn deletion_blobs(pool: &PgPool, request_id: Uuid) -> Result<Vec<ResolvedDeletionBlob>, ()> {
-    let rows:Vec<(String,i64)>=sqlx::query_as("select distinct i.blob_ref,coalesce(e.byte_size,x.byte_size) from claude_archive.privacy_deletion_items i left join claude_archive.exports e on i.blob_ref=e.blob_ref left join claude_archive.extracted_artifacts x on i.blob_ref=x.blob_ref where i.request_id=$1 and i.action='erase_blob' and i.blob_ref is not null").bind(request_id).fetch_all(pool).await.map_err(|_|())?;
-    rows.into_iter()
-        .map(|(key, length)| {
+async fn deletion_blobs(
+    pool: &PgPool,
+    blobs: &BlobStore,
+    request_id: Uuid,
+) -> Result<Vec<ResolvedDeletionBlob>, ()> {
+    let keys: Vec<String> = sqlx::query_scalar(
+        "select distinct blob_ref from claude_archive.privacy_deletion_items
+         where request_id=$1 and action='erase_blob' and blob_ref is not null order by blob_ref",
+    )
+    .bind(request_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| ())?;
+    keys.into_iter()
+        .map(|key| {
             let digest = key.strip_prefix("sha256/").ok_or(())?.to_owned();
-            Ok(ResolvedDeletionBlob {
-                key,
-                reference: BlobRef {
+            let reference = match blobs.locate(&digest) {
+                Ok(reference) => reference,
+                // An interrupted earlier run already erased it, and erasing an absent object is
+                // a no-op, so any length names it.
+                Err(StoreError::Missing { .. }) => BlobRef {
                     owner_service: ratatoskr_claude_archive::blob_store::OWNER_SERVICE.to_owned(),
                     algorithm: DigestAlgorithm::Sha256,
                     digest_hex: digest,
                     media_type: MediaType::parse("application/octet-stream").map_err(|_| ())?,
-                    length_bytes: u64::try_from(length).map_err(|_| ())?,
+                    length_bytes: 0,
                 },
-            })
+                Err(_) => return Err(()),
+            };
+            Ok(ResolvedDeletionBlob { key, reference })
         })
         .collect()
 }

@@ -9,6 +9,9 @@ use uuid::Uuid;
 mod execution;
 mod persistence;
 mod planning;
+mod planning_closure;
+mod rows;
+mod tombstones;
 
 use persistence::persist_scoped_inventory;
 
@@ -193,6 +196,8 @@ pub enum PrivacyDeletionError {
 pub enum FinalizationFault {
     /// Fail immediately after the first selected database removal.
     AfterFirstRemoval,
+    /// Stop after the row-removal transaction committed and before any byte is erased.
+    AfterRowsCommitted,
 }
 
 /// Privacy-deletion execution failure.
@@ -216,6 +221,12 @@ pub enum PrivacyDeletionExecutionError {
     /// Durable inventory names a blob the caller did not resolve exactly.
     #[error("privacy deletion blob inventory is unresolved")]
     UnresolvedBlob,
+    /// A request that must tombstone carries a tenant reference that is not a Platform user.
+    #[error("privacy deletion tenant reference is not a Platform user")]
+    InvalidTenant,
+    /// A tombstone envelope could not be built or stored.
+    #[error("privacy deletion tombstone could not be recorded")]
+    Tombstone(#[from] crate::ArchiveEventError),
 }
 
 /// PostgreSQL-backed inventory planner.
@@ -228,6 +239,17 @@ pub struct PrivacyDeletionPlanner {
 #[derive(Debug, Clone)]
 pub struct PrivacyDeletionExecutor {
     pool: PgPool,
+}
+
+/// Every `(table, column)` foreign key into a deletion root that is not `ON DELETE CASCADE` and
+/// that deletion handles itself.
+///
+/// The census test queries `pg_constraint` and fails for a reference that is neither cascading nor
+/// listed here, so a new foreign key cannot slip past deletion unnoticed.
+#[doc(hidden)]
+#[must_use]
+pub fn handled_references() -> &'static [(&'static str, &'static str)] {
+    rows::HANDLED_REFERENCES
 }
 
 async fn lock_tenant(

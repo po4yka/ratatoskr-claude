@@ -55,7 +55,7 @@ async fn deletion_finalization_is_atomic_with_audit_and_tombstones() {
     let request_id = Uuid::parse_str(REQUEST).expect("request fixture UUID is valid");
     PrivacyDeletionPlanner::new(db.database.pool().clone())
         .plan_conversation(&ConversationDeletionPlanRequest {
-            tenant_ref: "tenant:finalization-owner".to_owned(),
+            tenant_ref: "user:00000000-0000-7000-8000-000000000a04".to_owned(),
             account_id: Uuid::parse_str(ACCOUNT).expect("account fixture UUID is valid"),
             request_id,
             request_key: "atomic-finalization".to_owned(),
@@ -66,23 +66,12 @@ async fn deletion_finalization_is_atomic_with_audit_and_tombstones() {
         .await
         .expect("conversation deletion inventory is durably planned");
 
-    // Finalization consumes a persisted propagation item; planning delivery
-    // expansion is independent of this transactionality contract.
-    sqlx::query(
-        "insert into claude_archive.privacy_deletion_items
-         (request_id, item_index, item_kind, subject_id, action)
-         select $1, coalesce(max(item_index), -1) + 1, 'downstream_tombstone',
-                $2, 'emit_tombstone'
-         from claude_archive.privacy_deletion_items where request_id = $1",
-    )
-    .bind(request_id)
-    .bind(CONVERSATION)
-    .execute(db.database.pool())
-    .await
-    .expect("the planned Knowledge-removal subject is persisted");
-
     let result = PrivacyDeletionExecutor::new(db.database.pool().clone())
-        .finalize(request_id, Some(FinalizationFault::AfterFirstRemoval))
+        .finalize(
+            request_id,
+            &evidence_ref("finalization-evidence"),
+            Some(FinalizationFault::AfterFirstRemoval),
+        )
         .await;
     let (normalized_rows, provenance_rows, terminal_audits, user_requested_tombstones, state) =
         sqlx::query_as::<_, (i64, i64, i64, i64, String)>(
@@ -232,7 +221,7 @@ async fn completed_deletion_replay_returns_original_report() {
     let request_id = Uuid::parse_str(REQUEST).expect("request fixture UUID is valid");
     PrivacyDeletionPlanner::new(db.database.pool().clone())
         .plan_conversation(&ConversationDeletionPlanRequest {
-            tenant_ref: "tenant:replay-owner".to_owned(),
+            tenant_ref: "user:00000000-0000-7000-8000-000000000a05".to_owned(),
             account_id: Uuid::parse_str(ACCOUNT).expect("account fixture UUID is valid"),
             request_id,
             request_key: "completed-replay".to_owned(),
@@ -256,7 +245,7 @@ async fn completed_deletion_replay_returns_original_report() {
     .expect("the replay-safe downstream subject is persisted");
     let executor = PrivacyDeletionExecutor::new(db.database.pool().clone());
     let first_report = executor
-        .finalize(request_id, None)
+        .finalize(request_id, &evidence_ref("replay-evidence"), None)
         .await
         .expect("the first execution completes");
     let durable_report: serde_json::Value = sqlx::query_scalar(
@@ -271,7 +260,10 @@ async fn completed_deletion_replay_returns_original_report() {
         .await
         .expect("first execution effects remain queryable");
 
-    let replayed_report = executor.finalize(request_id, None).await.ok();
+    let replayed_report = executor
+        .finalize(request_id, &evidence_ref("replay-evidence"), None)
+        .await
+        .ok();
     let effects_after_replay = replay_effects(db.database.pool(), request_id)
         .await
         .expect("replay effects remain queryable");

@@ -646,6 +646,8 @@ create table claude_archive.privacy_deletion_requests (
     completion_report jsonb,
     error_code        text,
     correlation_id    text        not null,
+    evidence_blob_ref text,
+    rows_removed_at   timestamptz,
     requested_at      timestamptz not null default now(),
     completed_at      timestamptz,
     constraint privacy_deletion_scope_kind_check
@@ -655,7 +657,7 @@ create table claude_archive.privacy_deletion_requests (
         or (scope_kind in ('raw_export', 'conversation') and scope_id is not null)
     ),
     constraint privacy_deletion_state_check
-        check (state in ('planned', 'purging', 'finalizing', 'completed', 'failed')),
+        check (state in ('planned', 'purging', 'completed', 'failed')),
     constraint privacy_deletion_request_identity_unique unique (tenant_ref, request_key)
 );
 
@@ -771,6 +773,17 @@ create table claude_archive.outbox_events (
     published_at    timestamptz,
     attempt_count   integer     not null default 0,
     next_attempt_at timestamptz,
+    last_error      text,
+    constraint outbox_events_event_type_check
+        check (event_type in ('platform.operation.reported.v1',
+                              'ai_archive.archive.imported.v1',
+                              'ai_archive.conversation.added.v1',
+                              'ai_archive.conversation.updated.v1',
+                              'ai_archive.project.added.v1',
+                              'ai_archive.project.updated.v1',
+                              'ai_archive.artifact.added.v1',
+                              'ai_archive.artifact.updated.v1',
+                              'ai_archive.subject.tombstoned.v1')),
     constraint outbox_events_aggregate_type_check
         check (aggregate_type in ('operation', 'export', 'import_run', 'project', 'conversation', 'message',
                                   'artifact', 'asset', 'archive', 'tombstone')),
@@ -798,17 +811,6 @@ create table claude_archive.knowledge_analysis_links (
     completion_event_id uuid primary key,
     ai_archive_id uuid not null,
     subject_kind text not null,
-    last_error      text,
-    constraint outbox_events_event_type_check
-        check (event_type in ('platform.operation.reported.v1',
-                              'ai_archive.archive.imported.v1',
-                              'ai_archive.conversation.added.v1',
-                              'ai_archive.conversation.updated.v1',
-                              'ai_archive.project.added.v1',
-                              'ai_archive.project.updated.v1',
-                              'ai_archive.artifact.added.v1',
-                              'ai_archive.artifact.updated.v1',
-                              'ai_archive.subject.tombstoned.v1')),
     subject_id text not null,
     content_digest_hex text not null,
     completed_at timestamptz not null,

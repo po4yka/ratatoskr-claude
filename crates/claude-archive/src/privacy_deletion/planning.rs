@@ -1,5 +1,7 @@
 //! Tenant-scoped privacy inventory planning.
 
+use super::planning_closure::add_dependent_closure;
+use super::tombstones::require_platform_owner;
 use super::*;
 
 impl PrivacyDeletionPlanner {
@@ -20,6 +22,7 @@ impl PrivacyDeletionPlanner {
     ) -> Result<DeletionInventory, PrivacyDeletionError> {
         let mut transaction = self.pool.begin().await?;
         lock_tenant(&mut transaction, &request.tenant_ref).await?;
+        lock_tenant(&mut transaction, &request.account_id.to_string()).await?;
         require_account(&mut transaction, request.account_id).await?;
 
         if let Some(inventory) = load_existing(&mut transaction, request).await? {
@@ -28,6 +31,8 @@ impl PrivacyDeletionPlanner {
         }
 
         let mut items = enumerate_tenant(&mut transaction, request).await?;
+        add_dependent_closure(&mut transaction, &request.tenant_ref, &mut items).await?;
+        require_platform_owner(&request.tenant_ref, &items)?;
         items.sort_by(|left, right| {
             (left.kind, &left.subject_id, left.action).cmp(&(
                 right.kind,
@@ -53,6 +58,7 @@ impl PrivacyDeletionPlanner {
     ) -> Result<DeletionInventory, PrivacyDeletionError> {
         let mut transaction = self.pool.begin().await?;
         lock_tenant(&mut transaction, &request.tenant_ref).await?;
+        lock_tenant(&mut transaction, &request.account_id.to_string()).await?;
         require_account(&mut transaction, request.account_id).await?;
         let owned: bool = sqlx::query_scalar(
             "select exists(select 1 from claude_archive.exports
@@ -81,6 +87,8 @@ impl PrivacyDeletionPlanner {
         .await?;
         add_export_rows(&mut transaction, &export_ids, &mut items).await?;
         add_observed_subjects(&mut transaction, &export_ids, &mut items).await?;
+        add_dependent_closure(&mut transaction, &request.tenant_ref, &mut items).await?;
+        require_platform_owner(&request.tenant_ref, &items)?;
         items.sort_by(|left, right| {
             (left.kind, &left.subject_id, left.action).cmp(&(
                 right.kind,
@@ -116,6 +124,7 @@ impl PrivacyDeletionPlanner {
     ) -> Result<DeletionInventory, PrivacyDeletionError> {
         let mut transaction = self.pool.begin().await?;
         lock_tenant(&mut transaction, &request.tenant_ref).await?;
+        lock_tenant(&mut transaction, &request.account_id.to_string()).await?;
         require_account(&mut transaction, request.account_id).await?;
         let owned: bool = sqlx::query_scalar(
             "select exists(
@@ -160,6 +169,8 @@ impl PrivacyDeletionPlanner {
         .await?;
         add_export_rows(&mut transaction, &export_ids, &mut items).await?;
         add_observed_subjects(&mut transaction, &export_ids, &mut items).await?;
+        add_dependent_closure(&mut transaction, &request.tenant_ref, &mut items).await?;
+        require_platform_owner(&request.tenant_ref, &items)?;
         items.sort_by(|left, right| {
             (left.kind, &left.subject_id, left.action).cmp(&(
                 right.kind,
@@ -623,7 +634,8 @@ async fn add_delivery_rows(
 
     let outbox_rows: Vec<Uuid> = sqlx::query_scalar(
         "select event_id from claude_archive.outbox_events
-         where tenant_ref = $1
+         where (tenant_ref = $1
+                and not (event_type = 'ai_archive.subject.tombstoned.v1' and published_at is null))
             or (aggregate_type = 'export' and aggregate_id = any($2))
          order by event_id",
     )

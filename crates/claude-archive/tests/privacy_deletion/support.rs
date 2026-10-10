@@ -176,10 +176,24 @@ values ('knowledge-analysis-completed', '57000000-0000-0000-0000-000000000001',
 insert into claude_archive.outbox_events
  (event_id, event_type, aggregate_type, aggregate_id, envelope, payload_digest,
   correlation_id, tenant_ref, occurred_at)
-values ('58000000-0000-0000-0000-000000000001', 'claude.export.ingested.v1', 'export',
+values ('58000000-0000-0000-0000-000000000001', 'ai_archive.archive.imported.v1', 'export',
         '20000000-0000-0000-0000-000000000001', '{}', decode(repeat('55', 32), 'hex'),
-        'seed-correlation', 'tenant:selected', '2026-01-02T00:00:00Z');
+        'seed-correlation', 'user:00000000-0000-7000-8000-000000000a01', '2026-01-02T00:00:00Z');
 "#;
+
+/// A stored content-free evidence blob, the reference a caller of `finalize` supplies.
+fn evidence_ref(label: &str) -> BlobRef {
+    let root = temp_root(label);
+    let store = BlobStore::open(&root).expect("the evidence store opens");
+    let reference = store
+        .store(
+            MediaType::parse("application/json").expect("the evidence media type is canonical"),
+            format!("{{\"evidence\":\"{label}\"}}").as_bytes(),
+        )
+        .expect("the evidence bytes are stored");
+    remove(&root);
+    reference
+}
 
 fn item(
     kind: DeletionItemKind,
@@ -361,7 +375,7 @@ async fn deletion_inventory_enumerates_complete_scope() {
     let planner = PrivacyDeletionPlanner::new(db.database.pool().clone());
     let actual = planner
         .plan_tenant(&TenantDeletionPlanRequest {
-            tenant_ref: "tenant:selected".to_owned(),
+            tenant_ref: "user:00000000-0000-7000-8000-000000000a01".to_owned(),
             account_id: Uuid::parse_str(ACCOUNT_ID).expect("account fixture UUID is valid"),
             request_id,
             request_key: "complete-closure".to_owned(),
@@ -438,7 +452,7 @@ async fn deletion_scope_does_not_disclose_cross_tenant_subjects() {
         .expect("tenant A fixture UUID is valid");
     let foreign = planner
         .plan_raw_export(&RawExportDeletionPlanRequest {
-            tenant_ref: "tenant:a".to_owned(),
+            tenant_ref: "user:00000000-0000-7000-8000-000000000a02".to_owned(),
             account_id: account_a,
             request_id: Uuid::parse_str("74000000-0000-0000-0000-000000000001")
                 .expect("foreign request UUID is valid"),
@@ -450,7 +464,7 @@ async fn deletion_scope_does_not_disclose_cross_tenant_subjects() {
         .await;
     let unknown = planner
         .plan_raw_export(&RawExportDeletionPlanRequest {
-            tenant_ref: "tenant:a".to_owned(),
+            tenant_ref: "user:00000000-0000-7000-8000-000000000a02".to_owned(),
             account_id: account_a,
             request_id: Uuid::parse_str("74000000-0000-0000-0000-000000000002")
                 .expect("unknown request UUID is valid"),
@@ -582,7 +596,7 @@ async fn conversation_plan_includes_containing_archives_and_only_unprovenanced_c
     let planner = PrivacyDeletionPlanner::new(db.database.pool().clone());
     let inventory = planner
         .plan_conversation(&ConversationDeletionPlanRequest {
-            tenant_ref: "tenant:conversation-owner".to_owned(),
+            tenant_ref: "user:00000000-0000-7000-8000-000000000a03".to_owned(),
             account_id: Uuid::parse_str(ACCOUNT).expect("account fixture UUID is valid"),
             request_id: Uuid::parse_str("84000000-0000-0000-0000-000000000001")
                 .expect("request fixture UUID is valid"),
@@ -654,3 +668,6 @@ mod execution_cases;
 
 #[path = "erasure_cases.rs"]
 mod erasure_cases;
+
+#[path = "closure_cases.rs"]
+mod closure_cases;

@@ -126,7 +126,7 @@ async fn tenant_deletion_retains_blob_referenced_by_another_tenant() {
     let request_id = Uuid::parse_str(REQUEST).expect("request fixture UUID is valid");
     let inventory = PrivacyDeletionPlanner::new(db.database.pool().clone())
         .plan_tenant(&TenantDeletionPlanRequest {
-            tenant_ref: "tenant:selected-blob-owner".to_owned(),
+            tenant_ref: "user:00000000-0000-7000-8000-000000000a06".to_owned(),
             account_id: Uuid::parse_str(SELECTED_ACCOUNT)
                 .expect("selected account fixture UUID is valid"),
             request_id,
@@ -155,7 +155,7 @@ async fn tenant_deletion_retains_blob_referenced_by_another_tenant() {
         },
     ];
     let execution = PrivacyDeletionExecutor::new(db.database.pool().clone())
-        .finalize_with_blob_store(request_id, &blob_store, &resolved_blobs)
+        .finalize_with_blob_store(request_id, &blob_store, &resolved_blobs, None)
         .await;
     let surviving_source_rows: i64 = sqlx::query_scalar(
         "select count(*) from claude_archive.project_sources
@@ -192,6 +192,21 @@ async fn tenant_deletion_retains_blob_referenced_by_another_tenant() {
         actual, expected,
         "tenant deletion must erase only exclusive blobs and retain shared bytes for surviving evidence"
     );
+}
+
+/// A resolved reference to a blob the store does not hold.
+fn absent_blob(key: &str) -> ResolvedDeletionBlob {
+    ResolvedDeletionBlob {
+        key: key.to_owned(),
+        reference: BlobRef {
+            owner_service: ratatoskr_claude_archive::blob_store::OWNER_SERVICE.to_owned(),
+            algorithm: ratatoskr_claude_archive::DigestAlgorithm::Sha256,
+            digest_hex: key.trim_start_matches("sha256/").to_owned(),
+            media_type: MediaType::parse("application/octet-stream")
+                .expect("fixture media type is canonical"),
+            length_bytes: 0,
+        },
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -421,21 +436,21 @@ async fn tenant_deletion_retains_only_content_free_audit() {
          (event_id, event_type, aggregate_type, aggregate_id, envelope,
           payload_digest, correlation_id, tenant_ref, occurred_at)
         values ('c6100000-0000-0000-0000-000000000001',
-                'claude.private.seed.v1', 'export',
+                'ai_archive.archive.imported.v1', 'export',
                 'c2000000-0000-0000-0000-000000000001',
                 '{"private":"private-outbox-payload"}', decode(repeat('d2', 32), 'hex'),
-                'private-seed-correlation', 'tenant:private-owner', now());
+                'private-seed-correlation', 'user:00000000-0000-7000-8000-000000000a07', now());
 
         insert into claude_archive.portable_exports
          (portable_export_id, tenant_ref, state, filters, output_blob_ref,
           correlation_id)
-        values ('c7000000-0000-0000-0000-000000000001', 'tenant:private-owner',
+        values ('c7000000-0000-0000-0000-000000000001', 'user:00000000-0000-7000-8000-000000000a07',
                 'completed', '{"private":"private-lifecycle-filter"}',
                 'sha256/private-portable-output', 'private-portable-correlation');
         insert into claude_archive.parser_migration_reports
          (migration_report_id, tenant_ref, operation_key, parser_name, parser_version,
           plan_fingerprint, state, report, correlation_id)
-        values ('c7100000-0000-0000-0000-000000000001', 'tenant:private-owner',
+        values ('c7100000-0000-0000-0000-000000000001', 'user:00000000-0000-7000-8000-000000000a07',
                 'private-migration-operation', 'private-parser-name', 'private-parser-target',
                 decode(repeat('d3', 32), 'hex'), 'completed',
                 '{"private":"private-migration-report"}', 'private-migration-correlation');
@@ -471,7 +486,7 @@ async fn tenant_deletion_retains_only_content_free_audit() {
     let request_id = Uuid::parse_str(REQUEST).expect("request fixture UUID is valid");
     PrivacyDeletionPlanner::new(db.database.pool().clone())
         .plan_tenant(&TenantDeletionPlanRequest {
-            tenant_ref: "tenant:private-owner".to_owned(),
+            tenant_ref: "user:00000000-0000-7000-8000-000000000a07".to_owned(),
             account_id: Uuid::parse_str(ACCOUNT).expect("account fixture UUID is valid"),
             request_id,
             request_key: "content-free-residue".to_owned(),
@@ -492,7 +507,12 @@ async fn tenant_deletion_retains_only_content_free_audit() {
                     key: extracted_key.clone(),
                     reference: extracted_ref.clone(),
                 },
+                // The child blobs were never stored; erasing an absent object is a no-op.
+                absent_blob(SOURCE_KEY),
+                absent_blob(ARTIFACT_KEY),
+                absent_blob(ASSET_KEY),
             ],
+            None,
         )
         .await
         .expect("the tenant deletion reaches terminal residue inspection");

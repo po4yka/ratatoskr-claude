@@ -273,6 +273,40 @@ impl BlobStore {
         Ok(bytes)
     }
 
+    /// Names the object this store holds under `digest_hex`, taking its length from the object.
+    ///
+    /// Callers that only know a content address (a deletion inventory stores keys, not lengths)
+    /// use this to obtain the exact reference [`Self::erase`] verifies against.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::InvalidIdentity`] for a digest that is not canonical and
+    /// [`StoreError::Missing`] when the store holds no such object.
+    pub fn locate(&self, digest_hex: &str) -> Result<BlobRef, StoreError> {
+        if !is_canonical_sha256(digest_hex) {
+            return Err(StoreError::InvalidIdentity);
+        }
+        let target = self.path_for_digest(digest_hex);
+        self.validate_target_parent(&target)?;
+        let metadata = fs::metadata(&target).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                StoreError::Missing {
+                    digest_hex: digest_hex.to_owned(),
+                }
+            } else {
+                error.into()
+            }
+        })?;
+        if !metadata.is_file() {
+            return Err(StoreError::InvalidIdentity);
+        }
+        Ok(Self::reference(
+            MediaType::parse("application/octet-stream")?,
+            digest_hex,
+            usize::try_from(metadata.len()).unwrap_or(usize::MAX),
+        ))
+    }
+
     /// Verifies integrity without materializing the bytes.
     ///
     /// # Errors
