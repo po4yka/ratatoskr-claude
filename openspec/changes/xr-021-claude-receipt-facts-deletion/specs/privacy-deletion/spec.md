@@ -51,3 +51,21 @@ The envelope of a tombstone SHALL carry the correlation id the deletion request 
 
 - **WHEN** a request stored under a correlation id that is not a namespaced reference is executed
 - **THEN** the deletion completes and its tombstones carry `privacy_request:<request id>`
+
+### Requirement: Subjects a retained export holds are announced again after the tombstone
+
+When a deletion tombstones an archive, every project, conversation and Artifact that stays because a retained export also observed it, and whose latest `ai_archive.*` fact names a deleted archive, SHALL be announced again in the same transaction as an `updated` fact whose `import_provenance` names the earliest retained export that observed it. The fact SHALL be stamped after the archive tombstone so it is published after it, and a survivor whose latest fact already names a retained archive SHALL NOT be announced again.
+
+#### Scenario: Oldest of three cumulative exports is deleted
+
+- **WHEN** the first of three exports that each observed the same project, conversation and Artifact is deleted
+- **THEN** after the archive tombstone the outbox holds one project, one conversation and one Artifact `updated` fact naming the second export, and no fact naming the third
+
+### Requirement: Deletion removes the import head of every deleted export
+
+Deletion SHALL remove the `ai_archive.archive.imported.v1` outbox rows of the deleted exports in every scope, because their `source_export` names bytes that are erased.
+
+#### Scenario: Raw export scope
+
+- **WHEN** one raw export is deleted
+- **THEN** its import head leaves the outbox and the heads of the retained exports remain

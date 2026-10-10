@@ -69,3 +69,16 @@
 - [x] 11.6 GREEN: plan an `emit_tombstone` item for every removed conversation and project, read the subjects before the observations are deleted, and tombstone them under the archive that observed them; `completed_deletion_replay_returns_original_report` now expects the conversation tombstone beside the archive tombstone, and the inventory expectations include the new items.
 - [x] 11.7 Documentation, so there is no test to fail first: `design.md`, `DEVELOPMENT.md` and `README.md`.
 - [x] 11.8 Run the full gate again against PostgreSQL and a JetStream-enabled `nats-server`.
+
+## 12. Third review fixes
+
+- [x] 12.1 RED: `crates/claude-archive/tests/privacy_deletion_survivors.rs` imports three cumulative exports through the real receipt and import path, deletes the first, and expects one project, one conversation and one Artifact `updated` fact after the archive tombstone naming the second export; it fails because nothing is announced again. It also expects only the recipes project to be announced again when the newest export is deleted.
+- [x] 12.2 GREEN: `contract_projection/reannounce.rs` rebuilds each `retain_evidenced` project, conversation and Artifact from its rows when its latest fact names a deleted archive, and `privacy_deletion/tombstones.rs` enqueues the facts in the row-removal transaction, stamped a millisecond after the tombstone. The pinned retained-conversation test now states that a subject that was never announced has nothing to announce again, and the open-decision wording is gone from `design.md` and `DEVELOPMENT.md`.
+- [x] 12.3 RED: the same file expects the import head of every deleted export to leave the outbox for the raw export, conversation and tenant scopes; the first two fail because the head stays and names an erased `source_export`.
+- [x] 12.4 GREEN: `planning_closure.rs` adds the archive aggregate of every deleted export to the outbox removal set.
+- [x] 12.5 RED: `projection_subjects.rs` adds `an_unscoped_artifact_id_in_two_tenants_is_added_for_each`; with the `tenant_ref` predicate of `latest_envelope` replaced by a tautology it fails (the second tenant's Artifact becomes `artifact.updated`), and it passes with the predicate.
+- [x] 12.6 Regression guard for behaviour that already holds, so there is no implementation step: the unscoped-Artifact test above passes against the current code.
+- [x] 12.7 RED: `schema.rs` expects an index on `outbox_events (tenant_ref, aggregate_type, aggregate_id, occurred_at desc)`; it fails because there is none. GREEN: `schema.sql` creates it in place.
+- [x] 12.8 Refactor after green, no behaviour change: the two long fixtures (`the_persisted_import_is_projected_into_archive_facts`, `seed_dependents`) are split into helpers and their `too_many_lines` expectations are gone; the synthetic-import setup of `projection_subjects.rs` moved to `tests/synthetic_import/mod.rs` for the new test file.
+- [x] 12.9 Documentation, so there is no test to fail first: `design.md`, `DEVELOPMENT.md`, `README.md` and the `privacy-deletion` spec delta.
+- [x] 12.10 Run the full gate again against PostgreSQL and a JetStream-enabled `nats-server`.
