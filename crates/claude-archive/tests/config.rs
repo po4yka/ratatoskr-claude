@@ -31,8 +31,8 @@ fn minimal_environment_loads_with_defaults() {
 
     assert_eq!(
         config.admin.listen_address,
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9084),
-        "the operator listener default is loopback port 9084"
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9086),
+        "the operator listener default is loopback port 9086"
     );
     assert_eq!(config.telemetry.log_filter, "info");
     assert_eq!(config.limits.database_connections, 8);

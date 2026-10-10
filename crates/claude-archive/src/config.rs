@@ -378,7 +378,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             admin: AdminConfig {
-                listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9084),
+                listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9086),
             },
             storage: StorageConfig {
                 blob_root: None,
