@@ -41,4 +41,13 @@ A user-requested deletion SHALL enqueue one `ai_archive.subject.tombstoned.v1` e
 #### Scenario: Archive deletion tombstone
 
 - **WHEN** an archive is deleted
-- **THEN** the outbox row decodes as an `EventEnvelope` whose payload is an `AiArchiveTombstone` with reason `user_requested` and an existing evidence blob
+- **THEN** the outbox row decodes as an `EventEnvelope` whose payload is an `AiArchiveTombstone` with reason `user_requested`, an existing evidence blob and the correlation id of the request
+
+### Requirement: Tombstones carry the correlation id of the request
+
+The envelope of a tombstone SHALL carry the correlation id the deletion request was recorded under, and when that value is not a namespaced reference it SHALL carry `privacy_request:<request id>` so the deletion still completes.
+
+#### Scenario: Unparsable stored correlation
+
+- **WHEN** a request stored under a correlation id that is not a namespaced reference is executed
+- **THEN** the deletion completes and its tombstones carry `privacy_request:<request id>`

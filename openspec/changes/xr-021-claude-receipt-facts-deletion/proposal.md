@@ -16,9 +16,10 @@ Changeset XR-021 fixes cross-repository integration defects, and several of them
 - Publish all archive event types through one ack-gated pump over a closed subject mapping, and constrain `event_type` in the schema.
 - Project the persisted import into `archive.imported`, `project.added|updated`, `conversation.added|updated` and `artifact.added|updated` facts in the transaction that persists an initial import or an applied reparse. The owner is the Platform user resolved from the configured account mapping.
 - Rework privacy deletion into rows first, bytes second, complete last: extend the planner with the dependent closure, delete `platform_operation_imports`, `reparse_runs` and `tombstones` of the selected exports for every scope, recompute blob sharing against the rows that remain, emit contract-conformant tombstones including one per deleted archive, and keep unpublished tombstones of earlier requests.
-- Move the operator listener default to 9086.
+- Move the operator listener default to 9086 and serve the receipt on a separate loopback listener, default 8097.
+- Review fixes: name every subject the projection cannot announce as a head gap, build a reparse head from the first persisted report, give Artifacts one identity per account and scope, assert that tombstones carry the request correlation, and prove the pump refusal path.
 
-Breaking, with no shims: `PrivacyDeletionExecutor::finalize` takes the evidence `BlobRef`; `FinalizationFault` gains `AfterRowsCommitted`; `InitialImportWorker::new` and `ReparseEngine::new` take the Platform user mapping; `schema.sql` changes in place (outbox `event_type` check, deletion request `evidence_blob_ref` and `rows_removed_at`); the operator port moves from 9084 to 9086.
+Breaking, with no shims: `PrivacyDeletionExecutor::finalize` takes the evidence `BlobRef`; `FinalizationFault` gains `AfterRowsCommitted`; `InitialImportWorker::new` and `ReparseEngine::new` take the Platform user mapping; `schema.sql` changes in place (outbox `event_type` check, deletion request `evidence_blob_ref` and `rows_removed_at`); the operator port moves from 9084 to 9086; `service_router` is replaced by `admin_router` and `receipt_router`, one per listener; `artifacts` gains a required `account_id`; a head gap kind is added for unprojected subjects.
 
 ## Capabilities
 

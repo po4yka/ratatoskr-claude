@@ -68,11 +68,13 @@ openspec validate --archived
 docker compose up -d
 cargo run -p ratatoskr-claude-archive-service
 # operator plane on 127.0.0.1:9086: /health/live /health/ready /metrics /version
+# Platform receipt on 127.0.0.1:8097: POST /v1/ai-archives/receipt, GET /v1/capabilities
 ```
 
 Configuration comes from `RATATOSKR__*` environment variables; required:
 `RATATOSKR__STORAGE__BLOB_ROOT` and `RATATOSKR__STORAGE__DATABASE_URL`. Defaults: operator listener
-`127.0.0.1:9086`, log filter `info`, 8 database connections, 5 s acquire timeout, 10 s shutdown
+`127.0.0.1:9086` (`RATATOSKR__ADMIN__LISTEN_ADDRESS`), receipt listener `127.0.0.1:8097`
+(`RATATOSKR__RECEIPT__LISTEN_ADDRESS`; both loopback, and configuration refuses the same address for both), log filter `info`, 8 database connections, 5 s acquire timeout, 10 s shutdown
 bound, and a 10 GiB maximum accepted archive size (`RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES`).
 `<binary> check-config` validates and prints the redacted effective configuration.
 
@@ -86,19 +88,50 @@ The archive event pump is proven against a real JetStream, never a fake: `CLAUDE
 
 ## Platform receipt listener
 
-The service router serves the operator plane and the private Platform receipt on one listener, so the listener
-address is both. `POST /v1/ai-archives/receipt` takes the Edge-minted claims named by
+The process binds two loopback listeners (XR-021 CONTRACTS.md S05). The operator listener
+(`RATATOSKR__ADMIN__LISTEN_ADDRESS`, default `127.0.0.1:9086`) serves `/health/live`, `/health/ready`,
+`/metrics` and `/version` and nothing else. The receipt listener (`RATATOSKR__RECEIPT__LISTEN_ADDRESS`,
+default `127.0.0.1:8097`) serves the private Platform receipt and nothing else, so the operator plane is
+never reachable on the port Platform forwards to. Each router refuses the other's routes with `404`, a
+test per router proves it, and configuration refuses the same address for both.
+
+`POST /v1/ai-archives/receipt` takes the Edge-minted claims named by
 `ratatoskr_ai_archive_contracts::platform_receipt` and answers `202 Accepted` with an empty body. Every other
 answer is `application/json` carrying an `ErrorEnvelope` (`claude.auth.unauthenticated` 401,
 `claude.request.invalid` 400, `claude.request.too_large` 413, `claude.request.method_not_allowed` 405,
 `claude.server.internal` 500), because Edge replaces any other body with `edge.upstream_invalid_response`.
 `GET /v1/capabilities` answers the unauthenticated capability document `{"service":"claude","capabilities":
-["ai_archive.receipt"]}` while the receipt route is mounted. XR-021 CONTRACTS.md S05 allocates 8097 to the
-receipt and 9086 to the operator plane; this process serves both from the one configured address, so a
-deployment that must expose them on different ports needs a second listener, which does not exist yet.
+["ai_archive.receipt"]}` on the receipt listener, where the receipt route is mounted.
 `RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` maps each Platform user to its archive account; the same mapping
 decides the Platform owner of every `ai_archive.*` fact and every deletion tombstone, and an account without a
 mapping emits no fact.
+
+## Facts, gaps and identity
+
+A subject the projection cannot announce (a row with no parser stamp, a message with no usable provider id,
+an Artifact with no verified bytes) is named on the `ai_archive.archive.imported.v1` head as an
+`unprojected_project`, `unprojected_conversation` or `unprojected_artifact` gap with the number of subjects
+lost, and an archive that lost one is never announced as `complete`. A reparse re-announces the head under
+the same archive id with the status, counts and warnings of the export's first persisted report, so a
+reparse never changes what Knowledge was told about completeness. The operation report of an import agrees
+with its head; the one exception is a duplicate delivery of an archive that is already imported, whose
+report is rebuilt from the persisted completeness report alone and does not count omissions.
+
+An Artifact is identified by its account, its scope (message, conversation, project, or none) and its
+provider id, each backed by a unique index, so a later export of the same account observes the existing row.
+The same provider id in a different scope is a different Artifact.
+
+## Privacy deletion refusal and correlation
+
+Deletion needs the Platform owner of the archive to write its tombstones, and the owner exists only in
+`RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS`. A deletion of an account that has a raw archive but no mapping is
+therefore refused at planning with `conflict`, and nothing is deleted: an account that was mapped when it was
+imported and has lost its mapping since holds facts Knowledge still serves, and deleting its rows without a
+tombstone would leave that data there. The remedy is to restore the mapping and plan again. The operator
+records `privacy-delete:<request id>` as the request correlation id and every tombstone envelope carries
+exactly that; the correlation id is free text in the request row, so a request recorded under a value that
+is not a namespaced reference is correlated to `privacy_request:<request id>` instead and execution never
+stalls on a label.
 
 ## Workflow
 

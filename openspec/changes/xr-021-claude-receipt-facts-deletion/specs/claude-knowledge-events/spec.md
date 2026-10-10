@@ -16,4 +16,31 @@ An import or reparse that changes persisted rows SHALL enqueue, in the transacti
 #### Scenario: Reparse with changed content
 
 - **WHEN** a reparse changes the content of one conversation
-- **THEN** exactly one conversation-updated fact is added and its contract validation passes
+- **THEN** exactly one conversation-updated fact is added and its contract validation passes, and the re-announced head carries the completeness report of the first import
+
+### Requirement: A subject that cannot be projected is named on the import head
+
+A subject the projection cannot announce SHALL be counted in a gap of kind `unprojected_project`, `unprojected_conversation` or `unprojected_artifact` on the import head, SHALL prevent the archive from being announced as complete, and SHALL cause the head to be re-announced on a reparse.
+
+#### Scenario: Artifact without verified bytes
+
+- **WHEN** an import contains an Artifact whose versions have no verified bytes
+- **THEN** the head carries an `unprojected_artifact` gap with an affected count of one and no Artifact fact exists for it
+
+### Requirement: An Artifact has one identity per account and scope
+
+A later export of the same account that contains an Artifact again SHALL observe the existing row for message, conversation, project and unscoped Artifacts alike.
+
+#### Scenario: Second export of the same account
+
+- **WHEN** two exports of one account each contain the same Artifact
+- **THEN** one Artifact row exists and both exports observe it
+
+### Requirement: A refused publish backs off without starving later rows
+
+A publish the broker refuses SHALL leave its row unpublished, count the attempt, record a safe error class and delay the next attempt, and the rows behind it SHALL be published in the same pass.
+
+#### Scenario: Oversized payload
+
+- **WHEN** one pending row exceeds the broker payload limit beside a deliverable row
+- **THEN** the oversized row has one attempt, an error class and a future attempt time, the deliverable row is published, and the pass reports a non-fatal broker error

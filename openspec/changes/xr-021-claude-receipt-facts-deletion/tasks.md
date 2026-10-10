@@ -45,3 +45,16 @@
 
 - [x] 9.1 Documentation, so there is no test to fail first: `DEVELOPMENT.md` (ports, receipt behaviour) and `README.md`.
 - [x] 9.2 Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, the 850-line check, `cargo test --workspace --locked`, `cargo test --workspace --locked --doc`, `cargo deny --locked check` and `openspec validate --all --strict`.
+
+## 10. Review fixes
+
+- [x] 10.1 RED: `crates/claude-archive/tests/config.rs` expects the receipt listener default `127.0.0.1:8097`, `RATATOSKR__RECEIPT__LISTEN_ADDRESS` accepted only as loopback with a port, and the same address for both listeners refused; `services/claude-archive/tests/admin.rs` expects the receipt router to serve the receipt and capability routes and no operator route and the operator router to serve neither receipt route; `boot.rs` expects the real binary to answer the capability probe on the receipt port and `404` for the other plane's routes.
+- [x] 10.2 GREEN: add `ReceiptConfig::listen_address`, replace `service_router` with `receipt_router`, bind and drain two listeners in `main.rs`, and update `DEVELOPMENT.md` and `README.md`.
+- [x] 10.3 RED: `operation_outbox.rs` `a_refused_publish_backs_off_and_never_starves_the_rows_behind_it` against a real JetStream. The behaviour already exists, so the test is a regression guard: it is shown to fail against a deliberately broken `record_refusal` instead.
+- [x] 10.4 RED: `contract_projection.rs` expects the reparse head to carry the first import's completeness report and warnings, an Artifact without verified bytes to be named as an `unprojected_artifact` gap, and an unstamped conversation to be named on a re-announced head.
+- [x] 10.5 GREEN: add `ReportView::original`, `Omitted` and the `unprojected_*` gaps, count every skip in the loaders, re-announce the head on an omission, and let the operation report agree.
+- [x] 10.6 RED: `artifact_identity.rs` expects a second export of the same account to observe one row for a project, conversation, message and unscoped Artifact.
+- [x] 10.7 GREEN: add `artifacts.account_id` and the message and unscoped unique indexes in `schema.sql`, scope the lookup by account, select Artifacts by account in tenant-scope planning and the portable export.
+- [x] 10.8 Regression guards for behaviour that already holds, so there is no implementation step: `closure_cases.rs` and `commit_cases.rs` assert that the tombstone envelope carries the recorded request correlation id, that a non-reference correlation falls back to `privacy_request:<request id>`, that no surviving row references a missing blob after the row phase and after the resume, and that the census fails on a stale handled entry. The correlation, fallback and census guards are each shown to fail against a deliberate mutation; the dangling-reference guard only observes an invariant the implementation already keeps.
+- [x] 10.9 Documentation, so there is no test to fail first: the unmapped-account refusal, the correlation fallback, the duplicate-delivery report limit and the identity rule in `DEVELOPMENT.md` and `design.md`.
+- [x] 10.10 Run the full gate again.

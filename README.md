@@ -431,7 +431,7 @@ The process foundation (configuration, telemetry, operator health, typed errors,
 
 ### Platform receipt, archive facts and privacy deletion
 
-The service answers the Platform archive receipt on `POST /v1/ai-archives/receipt` and advertises it on the unauthenticated `GET /v1/capabilities`; every refusal is a JSON `ErrorEnvelope`, because Edge discards any other body. The operator plane defaults to `127.0.0.1:9086`.
+The service answers the Platform archive receipt on `POST /v1/ai-archives/receipt` and advertises it on the unauthenticated `GET /v1/capabilities`; every refusal is a JSON `ErrorEnvelope`, because Edge discards any other body. The receipt is served on its own loopback listener, which defaults to `127.0.0.1:8097`, and the operator plane on `127.0.0.1:9086`; neither serves the other's routes.
 
 A completed import or an applied reparse enqueues, in the transaction that persists it, an `ai_archive.archive.imported.v1` fact and the project, conversation and Artifact facts it changed, owned by the Platform user that `RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` maps to the archive account. One pump publishes every archive event type, in order, and marks a row published only after the broker acknowledged it. An import that is not complete is reported as `partially_succeeded` with the `ai_archive.import.incomplete` warning.
 
