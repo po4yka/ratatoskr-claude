@@ -21,14 +21,18 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use http_body_util::BodyExt as _;
+use ratatoskr_ai_archive_contracts::platform_receipt::receipt_capability_document;
 use ratatoskr_claude_archive::{
     ArchiveIdentity, BlobStore, Database, MediaType, PlatformOperation, StoreError, TenantClaim,
 };
+
+use crate::fault::{Kind, reject};
 use serde::Serialize;
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::SyncIoBridge;
 use uuid::Uuid;
 
+mod fault;
 pub mod lifecycle_commands;
 pub mod operator_commands;
 
@@ -307,6 +311,11 @@ pub fn admin_router(
 }
 
 /// Combines operator probes with the private Platform receipt listener.
+///
+/// The capability probe is mounted beside the receipt route and nowhere else, so the capability is
+/// advertised exactly while the receipt works. Both routes answer every refusal, including a wrong
+/// method, as a JSON `ErrorEnvelope`; the receipt router carries its own method fallbacks because
+/// axum refuses to merge two routers that both set a router-level fallback.
 pub fn service_router(
     runtime: Arc<RuntimeState>,
     render_metrics: impl Fn() -> String + Send + Sync + 'static,
@@ -314,10 +323,26 @@ pub fn service_router(
 ) -> Router {
     admin_router(runtime, render_metrics).merge(
         Router::new()
-            .route("/v1/ai-archives/receipt", post(platform_receipt))
+            .route(
+                "/v1/ai-archives/receipt",
+                post(platform_receipt).fallback(method_not_allowed),
+            )
+            .route(
+                "/v1/capabilities",
+                get(receipt_capabilities).fallback(method_not_allowed),
+            )
             .with_state(Arc::new(receipt))
             .layer(middleware::from_fn(no_store)),
     )
+}
+
+/// The unauthenticated capability document of the receipt listener.
+async fn receipt_capabilities() -> Json<serde_json::Value> {
+    Json(receipt_capability_document("claude"))
+}
+
+async fn method_not_allowed() -> Response {
+    reject(Kind::MethodNotAllowed)
 }
 
 /// *This process's async runtime is scheduling tasks and the server answers.*
@@ -376,34 +401,39 @@ async fn version() -> Json<Version> {
 async fn platform_receipt(
     State(state): State<Arc<PlatformReceiptState>>,
     headers: HeaderMap,
-    mut body: Body,
-) -> StatusCode {
-    if headers.contains_key(header::AUTHORIZATION) {
-        return StatusCode::UNAUTHORIZED;
+    body: Body,
+) -> Response {
+    match receive(&state, &headers, body).await {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(kind) => reject(kind),
     }
-    let Some((claim, identity, operation)) = platform_claims(&state, &headers) else {
-        return StatusCode::UNAUTHORIZED;
-    };
+}
+
+async fn receive(
+    state: &PlatformReceiptState,
+    headers: &HeaderMap,
+    mut body: Body,
+) -> Result<(), Kind> {
+    if headers.contains_key(header::AUTHORIZATION) {
+        return Err(Kind::Unauthenticated);
+    }
+    let (claim, identity, operation) =
+        platform_claims(state, headers).ok_or(Kind::Unauthenticated)?;
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         != Some("application/zip")
     {
-        return StatusCode::BAD_REQUEST;
+        return Err(Kind::Invalid);
     }
 
-    let scope = match ratatoskr_claude_archive::receipt::authenticate_claim(&state.database, &claim)
+    let scope = ratatoskr_claude_archive::receipt::authenticate_claim(&state.database, &claim)
         .await
-    {
-        Ok(scope) => scope,
-        Err(ratatoskr_claude_archive::ReceiptError::UnknownTenant) => {
-            return StatusCode::UNAUTHORIZED;
-        }
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    let Ok(media_type) = MediaType::parse("application/zip") else {
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    };
+        .map_err(|error| match error {
+            ratatoskr_claude_archive::ReceiptError::UnknownTenant => Kind::Unauthenticated,
+            _ => Kind::Internal,
+        })?;
+    let media_type = MediaType::parse("application/zip").map_err(|_| Kind::Internal)?;
     let (reader, mut writer) = tokio::io::duplex(RECEIPT_PIPE_BYTES);
     let blob_store = state.blob_store.clone();
     let maximum = state.max_archive_bytes;
@@ -420,35 +450,31 @@ async fn platform_receipt(
     while let Some(frame) = body.frame().await {
         let Ok(frame) = frame else {
             receiver.abort();
-            return StatusCode::BAD_REQUEST;
+            return Err(Kind::Invalid);
         };
         if let Ok(bytes) = frame.into_data()
             && writer.write_all(&bytes).await.is_err()
         {
-            receiver.abort();
-            return StatusCode::INTERNAL_SERVER_ERROR;
+            // The receiver stopped reading because it refused the stream; its result says why.
+            break;
         }
     }
-    if writer.shutdown().await.is_err() {
-        receiver.abort();
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
+    // A failed shutdown means the same thing: the receiver's own result is the truth.
+    let _ignored = writer.shutdown().await;
+    drop(writer);
     match receiver.await {
-        Ok(Ok(blob_ref)) => {
-            match ratatoskr_claude_archive::receipt::record_verified_platform_archive(
-                &state.database,
-                scope,
-                blob_ref,
-                operation,
-            )
-            .await
-            {
-                Ok(_) => StatusCode::ACCEPTED,
-                Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            }
-        }
-        Ok(Err(StoreError::DeclaredIdentityMismatch)) => StatusCode::BAD_REQUEST,
-        Ok(Err(_)) | Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        Ok(Ok(blob_ref)) => ratatoskr_claude_archive::receipt::record_verified_platform_archive(
+            &state.database,
+            scope,
+            blob_ref,
+            operation,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|_| Kind::Internal),
+        Ok(Err(StoreError::LimitExceeded { .. })) => Err(Kind::TooLarge),
+        Ok(Err(StoreError::DeclaredIdentityMismatch)) => Err(Kind::Invalid),
+        Ok(Err(_)) | Err(_) => Err(Kind::Internal),
     }
 }
 

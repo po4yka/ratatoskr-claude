@@ -14,10 +14,16 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use ratatoskr_ai_archive_contracts::platform_receipt::{
+    ARCHIVE_MEDIA_TYPE, CAPABILITIES_PATH, HEADER_ARCHIVE_BYTE_SIZE, HEADER_ARCHIVE_SHA256,
+    HEADER_CORRELATION_ID, HEADER_DEVICE_ID, HEADER_OPERATION_ID, HEADER_USER_ID, RECEIPT_PATH,
+    receipt_capability_document,
+};
 use ratatoskr_claude_archive::BlobStore;
 use ratatoskr_claude_archive::blob_store::scratch::{remove, temp_root};
 use ratatoskr_claude_archive::test_support::TestDatabase;
 use ratatoskr_claude_archive_service::{PlatformReceiptState, RuntimeState};
+use ratatoskr_error_contracts::ErrorEnvelope;
 use serde_json::Value;
 use tower::ServiceExt as _;
 
@@ -42,7 +48,7 @@ async fn get(router: axum::Router, path: &str) -> (StatusCode, Value, Option<Str
         .await
         .expect("the body collects")
         .to_bytes();
-    let body: Value = serde_json::from_slice(&bytes).expect("admin bodies are JSON");
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, body, cache_control)
 }
 
@@ -253,4 +259,250 @@ async fn platform_archive_receipt_route_is_available() {
         .cleanup()
         .await
         .expect("the disposable database cleans up");
+}
+
+const PLATFORM_USER: &str = "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb56";
+const RECEIPT_LIMIT: u64 = 1024;
+
+struct ReceiptFixture {
+    database: TestDatabase,
+    root: std::path::PathBuf,
+    router: axum::Router,
+}
+
+impl ReceiptFixture {
+    async fn open(label: &str) -> Self {
+        let database = TestDatabase::create()
+            .await
+            .expect("a disposable database applies the definition");
+        let platform_user =
+            uuid::Uuid::parse_str(PLATFORM_USER).expect("the fixture Platform user is a UUID");
+        let archive_account = uuid::Uuid::now_v7();
+        sqlx::query(
+            "insert into claude_archive.accounts (account_id, external_account_id) values ($1, $2)",
+        )
+        .bind(archive_account)
+        .bind(format!("account-{archive_account}"))
+        .execute(database.database.pool())
+        .await
+        .expect("the mapped archive account inserts");
+        let root = temp_root(label);
+        let store = BlobStore::open(&root).expect("the temporary blob store opens");
+        let router = ratatoskr_claude_archive_service::service_router(
+            Arc::new(RuntimeState::new()),
+            || "stub".to_owned(),
+            PlatformReceiptState::new(
+                database.database.clone(),
+                store,
+                &[(platform_user, archive_account)],
+                RECEIPT_LIMIT,
+            ),
+        );
+        Self {
+            database,
+            root,
+            router,
+        }
+    }
+
+    async fn close(self) {
+        remove(&self.root);
+        self.database
+            .cleanup()
+            .await
+            .expect("the disposable database cleans up");
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+/// The trusted claims Edge mints for `body`, as `(name, value)` pairs a case can edit.
+fn receipt_headers(body: &[u8]) -> Vec<(String, String)> {
+    vec![
+        ("content-type".to_owned(), ARCHIVE_MEDIA_TYPE.to_owned()),
+        (HEADER_USER_ID.to_owned(), PLATFORM_USER.to_owned()),
+        (
+            HEADER_DEVICE_ID.to_owned(),
+            "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb57".to_owned(),
+        ),
+        (
+            HEADER_CORRELATION_ID.to_owned(),
+            "archive-receipt-test".to_owned(),
+        ),
+        (
+            HEADER_OPERATION_ID.to_owned(),
+            "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb58".to_owned(),
+        ),
+        (HEADER_ARCHIVE_SHA256.to_owned(), sha256_hex(body)),
+        (HEADER_ARCHIVE_BYTE_SIZE.to_owned(), body.len().to_string()),
+    ]
+}
+
+struct Refusal {
+    label: &'static str,
+    method: &'static str,
+    body: Vec<u8>,
+    edit: fn(&mut Vec<(String, String)>),
+    status: StatusCode,
+    code: &'static str,
+}
+
+fn refusals() -> Vec<Refusal> {
+    vec![
+        Refusal {
+            label: "missing claims",
+            method: "POST",
+            body: b"x".to_vec(),
+            edit: |headers| headers.retain(|(name, _)| name == "content-type"),
+            status: StatusCode::UNAUTHORIZED,
+            code: "claude.auth.unauthenticated",
+        },
+        Refusal {
+            label: "an Authorization header",
+            method: "POST",
+            body: b"x".to_vec(),
+            edit: |headers| headers.push(("authorization".to_owned(), "Bearer x".to_owned())),
+            status: StatusCode::UNAUTHORIZED,
+            code: "claude.auth.unauthenticated",
+        },
+        Refusal {
+            label: "an unknown tenant",
+            method: "POST",
+            body: b"x".to_vec(),
+            edit: |headers| {
+                headers.retain(|(name, _)| name != HEADER_USER_ID);
+                headers.push((
+                    HEADER_USER_ID.to_owned(),
+                    "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb99".to_owned(),
+                ));
+            },
+            status: StatusCode::UNAUTHORIZED,
+            code: "claude.auth.unauthenticated",
+        },
+        Refusal {
+            label: "a wrong content type",
+            method: "POST",
+            body: b"x".to_vec(),
+            edit: |headers| {
+                headers.retain(|(name, _)| name != "content-type");
+                headers.push(("content-type".to_owned(), "text/plain".to_owned()));
+            },
+            status: StatusCode::BAD_REQUEST,
+            code: "claude.request.invalid",
+        },
+        Refusal {
+            label: "a missing content type",
+            method: "POST",
+            body: b"x".to_vec(),
+            edit: |headers| headers.retain(|(name, _)| name != "content-type"),
+            status: StatusCode::BAD_REQUEST,
+            code: "claude.request.invalid",
+        },
+        Refusal {
+            label: "a declared identity mismatch",
+            method: "POST",
+            body: b"x".to_vec(),
+            edit: |headers| {
+                headers.retain(|(name, _)| name != HEADER_ARCHIVE_SHA256);
+                headers.push((HEADER_ARCHIVE_SHA256.to_owned(), sha256_hex(b"y")));
+            },
+            status: StatusCode::BAD_REQUEST,
+            code: "claude.request.invalid",
+        },
+        Refusal {
+            label: "a body over the limit",
+            method: "POST",
+            body: vec![b'z'; 2048],
+            edit: |_| {},
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "claude.request.too_large",
+        },
+        Refusal {
+            label: "the wrong method",
+            method: "PUT",
+            body: b"x".to_vec(),
+            edit: |_| {},
+            status: StatusCode::METHOD_NOT_ALLOWED,
+            code: "claude.request.method_not_allowed",
+        },
+    ]
+}
+
+#[tokio::test]
+async fn capabilities_document_is_served_without_claims() {
+    let fixture = ReceiptFixture::open("receipt-capabilities").await;
+
+    let (status, body, cache_control) = get(fixture.router.clone(), CAPABILITIES_PATH).await;
+
+    assert_eq!(
+        (status, body, cache_control.as_deref()),
+        (
+            StatusCode::OK,
+            receipt_capability_document("claude"),
+            Some("no-store")
+        ),
+        "the capability probe needs no claim and answers the contract document"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn receipt_refusals_are_error_envelopes() {
+    let fixture = ReceiptFixture::open("receipt-refusals").await;
+
+    for refusal in refusals() {
+        let mut headers = receipt_headers(&refusal.body);
+        (refusal.edit)(&mut headers);
+        let mut request = Request::builder().method(refusal.method).uri(RECEIPT_PATH);
+        for (name, value) in &headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(
+                request
+                    .body(Body::from(refusal.body.clone()))
+                    .expect("the refusal request is well-formed"),
+            )
+            .await
+            .expect("the in-memory service answers");
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .map(|value| value.to_str().expect("header is ASCII").to_owned());
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("the body collects")
+            .to_bytes();
+        let envelope = serde_json::from_slice::<ErrorEnvelope>(&bytes);
+
+        assert_eq!(status, refusal.status, "{}: status", refusal.label);
+        assert_eq!(
+            content_type.as_deref(),
+            Some("application/json"),
+            "{}: content type",
+            refusal.label
+        );
+        let envelope = envelope
+            .unwrap_or_else(|_| panic!("{}: the body parses as an ErrorEnvelope", refusal.label));
+        assert_eq!(
+            envelope.code.as_str(),
+            refusal.code,
+            "{}: code",
+            refusal.label
+        );
+        assert!(!envelope.retryable, "{}: not retryable", refusal.label);
+    }
+    fixture.close().await;
 }
