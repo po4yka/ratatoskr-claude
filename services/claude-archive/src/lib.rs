@@ -2,8 +2,9 @@
 #![deny(missing_docs)]
 
 //! Process boundary for the Ratatoskr Claude Archive service: the runtime
-//! lifecycle facts readiness is computed from, and the loopback operator
-//! router serving liveness, readiness, metrics, and version.
+//! lifecycle facts readiness is computed from, the loopback operator router
+//! serving liveness, readiness, metrics, and version, and the separate
+//! loopback router serving the private Platform archive receipt.
 //!
 //! Every admin response carries `Cache-Control: no-store`: a cached "ready"
 //! is a routing decision made from stale data.
@@ -314,30 +315,24 @@ pub fn admin_router(
         .layer(middleware::from_fn(no_store))
 }
 
-/// Combines operator probes with the private Platform receipt listener.
+/// Builds the private Platform receipt router, served on the receipt listener only.
 ///
-/// The capability probe is mounted beside the receipt route and nowhere else, so the capability is
-/// advertised exactly while the receipt works. Both routes answer every refusal, including a wrong
-/// method, as a JSON `ErrorEnvelope`; the receipt router carries its own method fallbacks because
-/// axum refuses to merge two routers that both set a router-level fallback.
-pub fn service_router(
-    runtime: Arc<RuntimeState>,
-    render_metrics: impl Fn() -> String + Send + Sync + 'static,
-    receipt: PlatformReceiptState,
-) -> Router {
-    admin_router(runtime, render_metrics).merge(
-        Router::new()
-            .route(
-                RECEIPT_PATH,
-                post(platform_receipt).fallback(method_not_allowed),
-            )
-            .route(
-                CAPABILITIES_PATH,
-                get(receipt_capabilities).fallback(method_not_allowed),
-            )
-            .with_state(Arc::new(receipt))
-            .layer(middleware::from_fn(no_store)),
-    )
+/// The receipt route and the capability probe share one sub-router, so the capability is
+/// advertised exactly while the receipt works, and the operator plane is never reachable on this
+/// port (XR-021 CONTRACTS.md S05). Both routes answer every refusal, including a wrong method, as
+/// a JSON `ErrorEnvelope` through their own method fallbacks.
+pub fn receipt_router(receipt: PlatformReceiptState) -> Router {
+    Router::new()
+        .route(
+            RECEIPT_PATH,
+            post(platform_receipt).fallback(method_not_allowed),
+        )
+        .route(
+            CAPABILITIES_PATH,
+            get(receipt_capabilities).fallback(method_not_allowed),
+        )
+        .with_state(Arc::new(receipt))
+        .layer(middleware::from_fn(no_store))
 }
 
 /// The unauthenticated capability document of the receipt listener.

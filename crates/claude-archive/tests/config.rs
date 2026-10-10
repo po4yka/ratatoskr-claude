@@ -34,6 +34,11 @@ fn minimal_environment_loads_with_defaults() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9086),
         "the operator listener default is loopback port 9086"
     );
+    assert_eq!(
+        config.receipt.listen_address,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8097),
+        "the Platform receipt listener default is loopback port 8097, apart from the operator plane"
+    );
     assert_eq!(config.telemetry.log_filter, "info");
     assert_eq!(config.limits.database_connections, 8);
     assert_eq!(config.limits.database_acquire_timeout_ms, 5_000);
@@ -87,6 +92,53 @@ fn malformed_value_names_field_and_hides_value() {
         "the failure text must never echo the supplied value"
     );
     assert!(!violation.rule.is_empty());
+}
+
+#[test]
+fn receipt_listener_address_is_configurable_and_loopback() {
+    let mut environment = minimal_environment();
+    environment.push(("RATATOSKR__RECEIPT__LISTEN_ADDRESS", "127.0.0.1:18097"));
+    let config = Config::from_environment(environment).expect("a loopback address is valid");
+    assert_eq!(
+        config.receipt.listen_address,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 18097)
+    );
+
+    for refused in ["0.0.0.0:8097", "127.0.0.1:0", "not-an-address"] {
+        let mut environment = minimal_environment();
+        environment.push(("RATATOSKR__RECEIPT__LISTEN_ADDRESS", refused));
+        let error = Config::from_environment(environment)
+            .expect_err("a non-loopback or malformed receipt address must refuse to load");
+        assert!(
+            error
+                .violations
+                .iter()
+                .any(|violation| violation.key == "RATATOSKR__RECEIPT__LISTEN_ADDRESS"),
+            "the refusal names the receipt listener field for {refused}"
+        );
+        assert!(
+            !error.to_string().contains(refused),
+            "the failure text never echoes the supplied value"
+        );
+    }
+}
+
+#[test]
+fn receipt_and_operator_listeners_may_not_share_an_address() {
+    let mut environment = minimal_environment();
+    environment.push(("RATATOSKR__ADMIN__LISTEN_ADDRESS", "127.0.0.1:8097"));
+
+    let error = Config::from_environment(environment)
+        .expect_err("the operator plane must not be exposed on the receipt port");
+
+    assert!(
+        error.violations.iter().any(|violation| {
+            violation.key == "RATATOSKR__RECEIPT__LISTEN_ADDRESS"
+                && violation.rule.contains("differ")
+        }),
+        "the refusal says the two listeners must differ, got: {:?}",
+        error.violations
+    );
 }
 
 #[test]

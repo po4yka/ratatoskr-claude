@@ -29,6 +29,9 @@ pub struct Config {
 /// Private receipt integration configuration.
 #[derive(Clone, Serialize)]
 pub struct ReceiptConfig {
+    /// Socket address of the private Platform receipt listener. XR-021 CONTRACTS.md S05 allocates
+    /// loopback port 8097 to it, separate from the operator plane.
+    pub listen_address: SocketAddr,
     /// Platform user identifiers mapped to known Claude archive account IDs.
     pub platform_accounts: Vec<(Uuid, Uuid)>,
     /// NATS `JetStream` endpoint for durable terminal operation reports.
@@ -43,6 +46,7 @@ impl std::fmt::Debug for ReceiptConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ReceiptConfig")
+            .field("listen_address", &self.listen_address)
             .field("platform_accounts", &self.platform_accounts.len())
             .field("event_bus_url", &"[REDACTED]")
             .field("event_bus_nkey_seed_path", &"[REDACTED]")
@@ -233,6 +237,16 @@ impl Config {
                 rule: "is required when the event bus URL is configured",
             });
         }
+        if config.receipt.listen_address == config.admin.listen_address
+            && !violations
+                .iter()
+                .any(|violation| violation.key.ends_with("__LISTEN_ADDRESS"))
+        {
+            violations.push(Violation {
+                key: "RATATOSKR__RECEIPT__LISTEN_ADDRESS".to_owned(),
+                rule: "must differ from RATATOSKR__ADMIN__LISTEN_ADDRESS: the operator plane is never served on the receipt port",
+            });
+        }
         validate_inspection_limits(&config.limits, &mut violations);
 
         if violations.is_empty() {
@@ -252,6 +266,13 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
         "RATATOSKR__ADMIN__LISTEN_ADDRESS" => match value.parse::<SocketAddr>() {
             Ok(address) if address.ip().is_loopback() && address.port() != 0 => {
                 config.admin.listen_address = address;
+            }
+            Ok(_) => violations.push(refused("must be a loopback address with a port")),
+            Err(_) => violations.push(refused("must be a socket address")),
+        },
+        "RATATOSKR__RECEIPT__LISTEN_ADDRESS" => match value.parse::<SocketAddr>() {
+            Ok(address) if address.ip().is_loopback() && address.port() != 0 => {
+                config.receipt.listen_address = address;
             }
             Ok(_) => violations.push(refused("must be a loopback address with a port")),
             Err(_) => violations.push(refused("must be a socket address")),
@@ -398,6 +419,7 @@ impl Default for Config {
                 max_compression_ratio: 100,
             },
             receipt: ReceiptConfig {
+                listen_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8097),
                 platform_accounts: Vec::new(),
                 event_bus_url: None,
                 event_bus_nkey_seed_path: None,

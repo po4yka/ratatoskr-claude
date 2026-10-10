@@ -235,17 +235,12 @@ async fn platform_archive_receipt_route_is_available() {
     .expect("the mapped archive account inserts");
     let root = temp_root("platform-receipt-route");
     let store = BlobStore::open(&root).expect("the temporary blob store opens");
-    let runtime = Arc::new(RuntimeState::new());
-    let router = ratatoskr_claude_archive_service::service_router(
-        runtime,
-        || "stub".to_owned(),
-        PlatformReceiptState::new(
-            database.database.clone(),
-            store,
-            &[(platform_user, archive_account)],
-            1024,
-        ),
-    );
+    let router = ratatoskr_claude_archive_service::receipt_router(PlatformReceiptState::new(
+        database.database.clone(),
+        store,
+        &[(platform_user, archive_account)],
+        1024,
+    ));
 
     let status = post_receipt(router).await;
 
@@ -288,16 +283,12 @@ impl ReceiptFixture {
         .expect("the mapped archive account inserts");
         let root = temp_root(label);
         let store = BlobStore::open(&root).expect("the temporary blob store opens");
-        let router = ratatoskr_claude_archive_service::service_router(
-            Arc::new(RuntimeState::new()),
-            || "stub".to_owned(),
-            PlatformReceiptState::new(
-                database.database.clone(),
-                store,
-                &[(platform_user, archive_account)],
-                RECEIPT_LIMIT,
-            ),
-        );
+        let router = ratatoskr_claude_archive_service::receipt_router(PlatformReceiptState::new(
+            database.database.clone(),
+            store,
+            &[(platform_user, archive_account)],
+            RECEIPT_LIMIT,
+        ));
         Self {
             database,
             root,
@@ -505,4 +496,47 @@ async fn receipt_refusals_are_error_envelopes() {
         assert!(!envelope.retryable, "{}: not retryable", refusal.label);
     }
     fixture.close().await;
+}
+
+/// The receipt listener (loopback 8097) and the operator listener (loopback 9086) are separate
+/// sockets, so each router must serve its own surface and none of the other's (XR-021
+/// CONTRACTS.md S05): the operator plane on the receipt port, or the receipt on the operator
+/// port, would defeat the allocation.
+#[tokio::test]
+async fn the_operator_router_serves_no_receipt_surface() {
+    let runtime = Arc::new(RuntimeState::new());
+    let router = ratatoskr_claude_archive_service::admin_router(runtime, || "stub".to_owned());
+
+    let (capabilities, _, _) = get(router.clone(), CAPABILITIES_PATH).await;
+    let receipt = post_receipt(router).await;
+
+    assert_eq!(
+        capabilities,
+        StatusCode::NOT_FOUND,
+        "the capability probe is advertised only where the receipt works"
+    );
+    assert_eq!(
+        receipt,
+        StatusCode::NOT_FOUND,
+        "the operator listener never accepts an archive"
+    );
+}
+
+#[tokio::test]
+async fn the_receipt_router_serves_no_operator_surface() {
+    let fixture = ReceiptFixture::open("receipt-no-operator").await;
+
+    let mut statuses = Vec::new();
+    for path in ["/health/live", "/health/ready", "/metrics", "/version"] {
+        let (status, _, _) = get(fixture.router.clone(), path).await;
+        statuses.push((path, status));
+    }
+    fixture.close().await;
+
+    assert!(
+        statuses
+            .iter()
+            .all(|(_, status)| *status == StatusCode::NOT_FOUND),
+        "the receipt port exposes no operator route: {statuses:?}"
+    );
 }

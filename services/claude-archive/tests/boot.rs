@@ -29,15 +29,29 @@ fn test_database_url() -> String {
 /// A distinct loopback port per test run: derived from the pid so parallel
 /// binaries never collide, well above the ephemeral-reservation zone used by
 /// sibling services.
-fn listen_port() -> u16 {
-    29000 + u16::try_from(std::process::id() % 20_000).unwrap_or(0)
+fn listen_port(slot: u16) -> u16 {
+    29000 + u16::try_from(std::process::id() % 5_000).unwrap_or(0) + slot * 5_000
 }
 
-fn valid_environment(listen_address: String, blob_root: &std::path::Path) -> Vec<(String, String)> {
+/// The receipt listener's port, in its own range so it never equals the operator port. Tests run
+/// in parallel inside one process, so each takes its own `slot`.
+fn receipt_port(slot: u16) -> u16 {
+    listen_port(slot) + 10_000
+}
+
+fn valid_environment(
+    slot: u16,
+    listen_address: String,
+    blob_root: &std::path::Path,
+) -> Vec<(String, String)> {
     vec![
         (
             "RATATOSKR__ADMIN__LISTEN_ADDRESS".to_owned(),
             listen_address,
+        ),
+        (
+            "RATATOSKR__RECEIPT__LISTEN_ADDRESS".to_owned(),
+            format!("127.0.0.1:{}", receipt_port(slot)),
         ),
         (
             "RATATOSKR__STORAGE__BLOB_ROOT".to_owned(),
@@ -64,11 +78,15 @@ impl Drop for RunningService {
     }
 }
 
-fn start_service() -> RunningService {
-    let port = listen_port();
+fn start_service(slot: u16) -> RunningService {
+    let port = listen_port(slot);
     let blob_root = scratch::temp_root("boot");
     let child = Command::new(BIN)
-        .envs(valid_environment(format!("127.0.0.1:{port}"), &blob_root))
+        .envs(valid_environment(
+            slot,
+            format!("127.0.0.1:{port}"),
+            &blob_root,
+        ))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -117,7 +135,7 @@ fn wait_for_status(port: u16, path: &str, expected: u16, deadline: Duration) -> 
 #[test]
 fn boots_serves_health_and_drains_on_sigterm() {
     // The compose database must be up for this test.
-    let mut service = start_service();
+    let mut service = start_service(0);
 
     let live_body = wait_for_status(service.port, "/health/live", 200, Duration::from_secs(30))
         .expect("the service reaches liveness within the boot window");
@@ -164,6 +182,38 @@ fn boots_serves_health_and_drains_on_sigterm() {
     // After drain begins, readiness must refuse new work even while the
     // listener was still open.
     drop(service);
+}
+
+/// Both allocations of XR-021 CONTRACTS.md S05 are real sockets of the one binary: the operator
+/// plane on its port and the Platform receipt (with its capability probe) on the other, each
+/// refusing the other's routes.
+#[test]
+fn serves_the_receipt_and_the_operator_plane_on_separate_listeners() {
+    let service = start_service(1);
+    let receipt = receipt_port(1);
+
+    wait_for_status(service.port, "/health/ready", 200, Duration::from_secs(30))
+        .expect("the operator plane reaches readiness");
+    let capabilities = wait_for_status(receipt, "/v1/capabilities", 200, Duration::from_secs(10))
+        .expect("the receipt listener answers its capability probe");
+    let operator_on_receipt = get_health(receipt, "/health/live");
+    let capability_on_operator = get_health(service.port, "/v1/capabilities");
+
+    assert!(
+        capabilities.contains("\"service\":\"claude\"")
+            && capabilities.contains("ai_archive.receipt"),
+        "the receipt listener serves the contract capability document: {capabilities}"
+    );
+    assert_eq!(
+        operator_on_receipt.map(|(status, _)| status),
+        Some(404),
+        "the receipt port never serves the operator plane"
+    );
+    assert_eq!(
+        capability_on_operator.map(|(status, _)| status),
+        Some(404),
+        "the operator port never advertises the receipt"
+    );
 }
 
 #[test]

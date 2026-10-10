@@ -5,7 +5,7 @@
 //!
 //! Sequence, in this order and no other: load configuration, install
 //! telemetry, refuse to start without a database, connect, apply the schema,
-//! prepare the blob store, bind the operator listener, mark readiness — then
+//! prepare the blob store, bind the operator and receipt listeners, mark readiness — then
 //! serve until SIGTERM or SIGINT and drain within the configured bound.
 //!
 //! Exit codes: `0` clean run; `1` runtime startup failure; `78`
@@ -253,7 +253,7 @@ async fn tokio_main() -> Result<(), ExitCode> {
     })?;
 
     let runtime = Arc::new(RuntimeState::new());
-    let listener = bind_listener(config.admin.listen_address).await?;
+    let listeners = Listeners::bind(&config).await?;
 
     // The first probes happen before readiness flips, so the process never
     // reports itself ready over unverified dependencies.
@@ -268,14 +268,14 @@ async fn tokio_main() -> Result<(), ExitCode> {
         Arc::clone(&runtime),
     )?;
     runtime.mark_startup_complete();
-    tracing::info!(admin = %config.admin.listen_address, "startup complete");
+    tracing::info!("startup complete");
 
     let metrics_handle = guard.metrics_handle();
     // A publisher that stopped on a fatal error never recovers by retrying, so the process exits
     // non-zero instead of serving as ready while archive events pile up unpublished.
     let serve_result = tokio::select! {
-        result = serve_admin(
-            listener,
+        result = serve_listeners(
+            listeners,
             Arc::clone(&runtime),
             database,
             blob_store,
@@ -301,17 +301,41 @@ async fn tokio_main() -> Result<(), ExitCode> {
             Ok(())
         }
         Err(error) => {
-            tracing::error!(%error, "the operator server failed");
+            tracing::error!(%error, "a listener server failed");
             Err(ExitCode::FAILURE)
         }
     }
 }
 
-async fn bind_listener(address: std::net::SocketAddr) -> Result<tokio::net::TcpListener, ExitCode> {
+/// The two loopback sockets of the process: the operator plane and the Platform receipt, which
+/// are distinct allocations (XR-021 CONTRACTS.md S05) and never serve each other's routes.
+struct Listeners {
+    operator: tokio::net::TcpListener,
+    receipt: tokio::net::TcpListener,
+}
+
+impl Listeners {
+    /// Binds both sockets before readiness can flip, so a taken port fails startup.
+    async fn bind(config: &Config) -> Result<Self, ExitCode> {
+        let operator = bind_listener("operator", config.admin.listen_address).await?;
+        let receipt = bind_listener("receipt", config.receipt.listen_address).await?;
+        tracing::info!(
+            admin = %config.admin.listen_address,
+            receipt = %config.receipt.listen_address,
+            "listeners bound"
+        );
+        Ok(Self { operator, receipt })
+    }
+}
+
+async fn bind_listener(
+    role: &'static str,
+    address: std::net::SocketAddr,
+) -> Result<tokio::net::TcpListener, ExitCode> {
     tokio::net::TcpListener::bind(address)
         .await
         .map_err(|error| {
-            tracing::error!(bind = %address, %error, "the operator listener could not bind");
+            tracing::error!(bind = %address, role, %error, "a listener could not bind");
             ExitCode::FAILURE
         })
 }
@@ -437,8 +461,8 @@ fn start_initial_importer(
     clippy::too_many_arguments,
     reason = "startup owns each independently drained runtime dependency"
 )]
-async fn serve_admin(
-    listener: tokio::net::TcpListener,
+async fn serve_listeners(
+    listeners: Listeners,
     runtime: Arc<RuntimeState>,
     database: Database,
     blob_store: BlobStore,
@@ -447,12 +471,19 @@ async fn serve_admin(
     render_metrics: impl Fn() -> String + Send + Sync + 'static,
     shutdown_timeout: Duration,
 ) -> Result<(), String> {
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let server = axum::serve(
-        listener,
-        ratatoskr_claude_archive_service::service_router(
-            runtime.clone(),
-            render_metrics,
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let drained = |mut signal: tokio::sync::watch::Receiver<bool>| async move {
+        let _ignored = signal.wait_for(|stop| *stop).await;
+    };
+    let operator = axum::serve(
+        listeners.operator,
+        ratatoskr_claude_archive_service::admin_router(runtime.clone(), render_metrics),
+    )
+    .with_graceful_shutdown(drained(shutdown_rx.clone()))
+    .into_future();
+    let receipt = axum::serve(
+        listeners.receipt,
+        ratatoskr_claude_archive_service::receipt_router(
             ratatoskr_claude_archive_service::PlatformReceiptState::new(
                 database.clone(),
                 blob_store,
@@ -461,10 +492,9 @@ async fn serve_admin(
             ),
         ),
     )
-    .with_graceful_shutdown(async move {
-        let _ignored = shutdown_rx.await;
-    })
+    .with_graceful_shutdown(drained(shutdown_rx))
     .into_future();
+    let server = async { tokio::try_join!(operator, receipt).map(|((), ())| ()) };
     tokio::pin!(server);
     tokio::select! {
         result = &mut server => {
@@ -473,13 +503,13 @@ async fn serve_admin(
         }
         result = shutdown_signal() => {
             result.map_err(|error| error.to_string())?;
-            // Readiness fails immediately; the listener stays open through
-            // the drain window so in-flight requests finish.
+            // Readiness fails immediately; both listeners stay open through the drain window so
+            // in-flight requests finish.
             runtime.begin_draining();
-            let _ignored = shutdown_tx.send(());
+            let _ignored = shutdown_tx.send(true);
             if tokio::time::timeout(shutdown_timeout, &mut server).await.is_err() {
                 database.close().await;
-                return Err("the operator server did not stop within the shutdown bound".to_owned());
+                return Err("the listeners did not stop within the shutdown bound".to_owned());
             }
             database.close().await;
             Ok(())
