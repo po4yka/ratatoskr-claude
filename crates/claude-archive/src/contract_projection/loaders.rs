@@ -84,16 +84,26 @@ pub(super) async fn load_projects(
             omitted.projects += 1;
             continue;
         };
+        let Some(title) = title
+            .as_deref()
+            .and_then(|value| AiTitle::parse(value).ok())
+            .or_else(|| AiTitle::parse(&external).ok())
+        else {
+            // The contract requires a title, and neither the name nor the provider id can be one.
+            // The project is named as a gap; failing the import would be retried forever.
+            tracing::warn!(
+                class = "project_unnamed",
+                "a project has neither a name nor an id the contract can hold"
+            );
+            omitted.projects += 1;
+            continue;
+        };
         records.push(ProjectRecord {
             project: AiProject {
                 ai_project_id: AiProjectId(project_id),
                 provider: provider.clone(),
                 external_project_id: EntityLocalId::parse(&external).ok(),
-                title: title
-                    .as_deref()
-                    .and_then(|value| AiTitle::parse(value).ok())
-                    .or_else(|| AiTitle::parse(&external).ok())
-                    .ok_or(ArchiveEventError::Identifier)?,
+                title,
                 description: description
                     .as_deref()
                     .and_then(|value| AiText::parse(value).ok()),
@@ -119,20 +129,46 @@ enum Decision {
     Updated,
 }
 
+/// The part of an Artifact fact that tells two Artifacts of one provider id apart.
+///
+/// A provider Artifact id such as `react-component` is minted per conversation or project, so it
+/// recurs inside one tenant and the aggregate (`artifact:<id>`) alone cannot say which Artifact an
+/// earlier fact described. The scope refs are what the wire carries to separate them.
+struct ArtifactScope {
+    conversation_ref: Option<String>,
+    project_ref: Option<String>,
+}
+
+/// The latest fact already enqueued for one identity of one tenant.
+///
+/// The lookup never crosses tenants: another tenant's facts for the same aggregate id (an Artifact
+/// id recurs across tenants) must not decide whether this tenant's subject is new. An Artifact
+/// lookup additionally matches the scope, so two Artifacts that share an id are not each other's
+/// previous revision.
 async fn latest_envelope(
     transaction: &mut Transaction<'_, Postgres>,
+    owner: TenantRef,
     aggregate_type: &str,
     aggregate_id: &str,
     event_types: [&str; 2],
+    scope: Option<&ArtifactScope>,
 ) -> Result<Option<EventEnvelope>, ReparseError> {
     let stored: Option<serde_json::Value> = sqlx::query_scalar(
         "select envelope from claude_archive.outbox_events
-         where aggregate_type = $1 and aggregate_id = $2 and event_type = any($3)
+         where tenant_ref = $1 and aggregate_type = $2 and aggregate_id = $3
+           and event_type = any($4)
+           and (not $5
+                or ((envelope #>> '{payload,artifact,conversation_ref}') is not distinct from $6
+                    and (envelope #>> '{payload,artifact,project_ref}') is not distinct from $7))
          order by occurred_at desc, event_id desc limit 1",
     )
+    .bind(owner.to_string())
     .bind(aggregate_type)
     .bind(aggregate_id)
     .bind(event_types.as_slice())
+    .bind(scope.is_some())
+    .bind(scope.and_then(|scope| scope.conversation_ref.as_deref()))
+    .bind(scope.and_then(|scope| scope.project_ref.as_deref()))
     .fetch_optional(&mut **transaction)
     .await?;
     stored
@@ -150,9 +186,11 @@ pub(super) async fn head_already_announced(
     let aggregate = head.ai_archive_id.as_entity_ref().to_string();
     let latest = latest_envelope(
         transaction,
+        head.owner,
         "archive",
         &aggregate,
         [ARCHIVE_IMPORTED, ARCHIVE_IMPORTED],
+        None,
     )
     .await?
     .and_then(|envelope| envelope.payload_as::<AiArchiveImport>().ok());
@@ -169,9 +207,11 @@ pub(super) async fn project_fact(
     let aggregate = project.ai_project_id.as_entity_ref().to_string();
     let latest = latest_envelope(
         transaction,
+        provenance.owner,
         "project",
         &aggregate,
         [PROJECT_ADDED, PROJECT_UPDATED],
+        None,
     )
     .await?
     .and_then(|envelope| {
@@ -421,9 +461,11 @@ pub(super) async fn conversation_fact(
     let aggregate = conversation.ai_conversation_id.as_entity_ref().to_string();
     let latest = latest_envelope(
         transaction,
+        conversation.owner,
         "conversation",
         &aggregate,
         [CONVERSATION_ADDED, CONVERSATION_UPDATED],
+        None,
     )
     .await?
     .and_then(|envelope| {
@@ -468,9 +510,11 @@ pub(super) async fn load_artifacts(
     omitted: &mut Omitted,
 ) -> Result<Vec<ArtifactRecord>, ReparseError> {
     let rows: Vec<ArtifactRow> = sqlx::query_as(
-        "select a.artifact_id, a.external_artifact_id, a.title, a.conversation_id, a.project_id,
+        "select a.artifact_id, a.external_artifact_id, a.title,
+                coalesce(a.conversation_id, m.conversation_id), a.project_id,
                 a.parser_name, a.parser_version
          from claude_archive.artifacts a
+         left join claude_archive.messages m on m.message_id = a.message_id
          join claude_archive.export_observations o
            on o.subject_kind = 'artifact' and o.subject_id = a.artifact_id
          where o.export_id = $1 order by a.external_artifact_id",
@@ -554,11 +598,17 @@ pub(super) async fn artifact_fact(
     let aggregate = EntityRef::parse(&format!("artifact:{}", artifact.external_artifact_id))
         .map_err(|_| ArchiveEventError::Identifier)?
         .to_string();
+    let scope = ArtifactScope {
+        conversation_ref: artifact.conversation_ref.as_ref().map(ToString::to_string),
+        project_ref: artifact.project_ref.as_ref().map(ToString::to_string),
+    };
     let latest = latest_envelope(
         transaction,
+        artifact.owner,
         "artifact",
         &aggregate,
         [ARTIFACT_ADDED, ARTIFACT_UPDATED],
+        Some(&scope),
     )
     .await?
     .and_then(|envelope| {
