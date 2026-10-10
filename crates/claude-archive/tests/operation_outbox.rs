@@ -87,6 +87,47 @@ async fn published_on(
     found
 }
 
+/// The stream sequence at which each of `event_ids` was stored on `subjects`, by `Nats-Msg-Id`.
+async fn stream_sequences(
+    stream: &async_nats::jetstream::stream::Stream,
+    event_ids: &[Uuid],
+) -> Vec<Option<u64>> {
+    let consumer = stream
+        .create_consumer(pull::Config {
+            filter_subject: "evt.ai_archive.>".to_owned(),
+            deliver_policy: DeliverPolicy::All,
+            ..Default::default()
+        })
+        .await
+        .expect("an ephemeral consumer attaches");
+    let mut batch = consumer
+        .fetch()
+        .max_messages(1000)
+        .expires(Duration::from_secs(3))
+        .messages()
+        .await
+        .expect("the batch opens");
+    let mut found = vec![None; event_ids.len()];
+    while let Some(message) = batch.next().await {
+        let message = message.expect("the delivery is readable");
+        let id = message
+            .headers
+            .as_ref()
+            .and_then(|headers| headers.get("Nats-Msg-Id"))
+            .map(ToString::to_string);
+        let sequence = message
+            .info()
+            .expect("the delivery carries stream info")
+            .stream_sequence;
+        for (slot, event_id) in found.iter_mut().zip(event_ids) {
+            if id.as_deref() == Some(event_id.to_string().as_str()) {
+                *slot = Some(sequence);
+            }
+        }
+    }
+    found
+}
+
 async fn connect() -> async_nats::jetstream::Context {
     let client = async_nats::connect(nats_url())
         .await
@@ -179,7 +220,7 @@ async fn an_event_type_outside_the_closed_list_is_a_hard_error() {
 }
 
 #[tokio::test]
-async fn the_pending_queue_covers_every_closed_type_in_publication_order() {
+async fn the_pending_queue_orders_by_occurred_at_and_drops_published_rows() {
     let db = TestDatabase::create()
         .await
         .expect("a disposable database applies the definition");
@@ -228,6 +269,56 @@ async fn the_pending_queue_covers_every_closed_type_in_publication_order() {
         remaining,
         vec![later.envelope.event_id.0],
         "a published row leaves the queue and the unpublished tombstone stays"
+    );
+}
+
+/// The ordering a consumer relies on is the pump's, not a copy of its query: a tombstone that
+/// happened after a conversation fact reaches the bus after it, whatever order they were stored.
+#[tokio::test]
+async fn the_pump_publishes_different_event_types_in_occurred_at_order() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let outbox = ArchiveOutbox::new(&db.database);
+    let tombstone: AiArchiveTombstone =
+        serde_json::from_str(TOMBSTONE).expect("the tombstone fixture decodes");
+    let added: AiConversationAdded =
+        serde_json::from_str(CONVERSATION_ADDED).expect("the conversation fixture decodes");
+    let later = outbox
+        .enqueue(
+            &ArchiveEventFact::Tombstoned(tombstone),
+            "2026-08-27T09:00:00Z".parse().expect("a canonical instant"),
+        )
+        .await
+        .expect("the tombstone is enqueued first");
+    let earlier = outbox
+        .enqueue(
+            &ArchiveEventFact::ConversationAdded(added),
+            "2026-08-27T08:00:00Z".parse().expect("a canonical instant"),
+        )
+        .await
+        .expect("the conversation fact is enqueued second");
+    let jetstream = connect().await;
+    let stream = events_stream(&jetstream).await;
+
+    let published = OutboxPublisher::new(db.database.pool().clone())
+        .publish_pending_with(&jetstream)
+        .await
+        .expect("the pump publishes both rows");
+    let sequences = stream_sequences(
+        &stream,
+        &[earlier.envelope.event_id.0, later.envelope.event_id.0],
+    )
+    .await;
+    db.cleanup().await.expect("cleanup succeeds");
+
+    assert_eq!(published, 2);
+    let [Some(first), Some(second)] = sequences[..] else {
+        panic!("both events must reach the bus: {sequences:?}");
+    };
+    assert!(
+        first < second,
+        "the earlier fact is stored before the later tombstone: {first} then {second}"
     );
 }
 

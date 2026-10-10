@@ -61,15 +61,14 @@ impl OutboxPublisher {
     ///
     /// Returns [`OutboxError::Database`] when the queue cannot be read.
     pub async fn pending_event_ids(&self) -> Result<Vec<Uuid>, OutboxError> {
-        sqlx::query_scalar(
-            "select event_id from claude_archive.outbox_events
-             where published_at is null and (next_attempt_at is null or next_attempt_at <= now())
-             order by occurred_at, event_id limit $1",
-        )
-        .bind(BATCH_SIZE)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(OutboxError::Database)
+        let rows = sqlx::query(PENDING_SQL)
+            .bind(BATCH_SIZE)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(OutboxError::Database)?;
+        rows.iter()
+            .map(|row| row.try_get("event_id").map_err(OutboxError::Database))
+            .collect()
     }
 
     /// Makes one bounded attempt to publish pending events.
