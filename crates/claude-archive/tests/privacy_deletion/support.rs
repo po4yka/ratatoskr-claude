@@ -337,6 +337,12 @@ fn expected_inventory(request_id: Uuid) -> DeletionInventory {
         ),
         item(
             DeletionItemKind::DownstreamTombstone,
+            PROJECT_ID,
+            DeletionAction::EmitTombstone,
+            None,
+        ),
+        item(
+            DeletionItemKind::DownstreamTombstone,
             CONVERSATION_ID,
             DeletionAction::EmitTombstone,
             None,
@@ -674,3 +680,6 @@ mod closure_cases;
 
 #[path = "commit_cases.rs"]
 mod commit_cases;
+
+#[path = "tombstone_cases.rs"]
+mod tombstone_cases;

@@ -106,6 +106,8 @@ impl PrivacyDeletionExecutor {
             lock_tenant(&mut transaction, &account_id.to_string()).await?;
         }
 
+        // Read before the observations go: a subject is tombstoned under the archive that saw it.
+        let subjects = super::tombstones::collect_subjects(&mut transaction, request_id).await?;
         sqlx::query(
             "delete from claude_archive.export_observations
              where export_id::text in (
@@ -123,7 +125,6 @@ impl PrivacyDeletionExecutor {
             ));
         }
 
-        let subjects = super::tombstones::collect_subjects(&mut transaction, request_id).await?;
         let tenant_scope = request.scope_kind == "tenant";
         if tenant_scope {
             delete_tenant_lifecycle_rows(&mut transaction, &request.tenant_ref, &accounts).await?;

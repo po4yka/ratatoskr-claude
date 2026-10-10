@@ -176,10 +176,6 @@ async fn replay_effects(
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "first completion and replay effects are one idempotency proof"
-)]
 async fn completed_deletion_replay_returns_original_report() {
     const ACCOUNT: &str = "a1000000-0000-0000-0000-000000000001";
     const CONVERSATION: &str = "a3000000-0000-0000-0000-000000000001";
@@ -231,18 +227,6 @@ async fn completed_deletion_replay_returns_original_report() {
         })
         .await
         .expect("replay deletion inventory is durably planned");
-    sqlx::query(
-        "insert into claude_archive.privacy_deletion_items
-         (request_id, item_index, item_kind, subject_id, action)
-         select $1, coalesce(max(item_index), -1) + 1, 'downstream_tombstone',
-                $2, 'emit_tombstone'
-         from claude_archive.privacy_deletion_items where request_id = $1",
-    )
-    .bind(request_id)
-    .bind(CONVERSATION)
-    .execute(db.database.pool())
-    .await
-    .expect("the replay-safe downstream subject is persisted");
     let executor = PrivacyDeletionExecutor::new(db.database.pool().clone());
     let first_report = executor
         .finalize(request_id, &evidence_ref("replay-evidence"), None)
@@ -277,7 +261,7 @@ async fn completed_deletion_replay_returns_original_report() {
     };
     let expected_effects = ReplayEffects {
         audits: 1,
-        tombstones: 1,
+        tombstones: 2,
         inventory_items: 0,
         conversations: 0,
         provenance_edges: 0,

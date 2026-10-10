@@ -1,14 +1,15 @@
 //! Contract tombstones for user-requested deletion.
 //!
-//! One `ai_archive.subject.tombstoned.v1` envelope per deleted archive, plus one per
-//! Knowledge-linked conversation or Artifact, owned by the Platform user and pointing at a
+//! One `ai_archive.subject.tombstoned.v1` envelope per deleted archive, per deleted conversation
+//! and project, and per Knowledge-linked Artifact, owned by the Platform user and pointing at a
 //! content-free evidence blob (XR-021 CONTRACTS.md S07).
 
 use ratatoskr_ai_archive_contracts::{
     AiArchiveTombstone, AiArchiveTombstoneReason, AiArchiveTombstoneSubject, AiProvider,
 };
 use ratatoskr_identifiers::{
-    AiArchiveId, AiConversationId, EntityLocalId, EntityRef, Extensions, TenantRef, WireTimestamp,
+    AiArchiveId, AiConversationId, AiProjectId, EntityLocalId, EntityRef, Extensions, TenantRef,
+    WireTimestamp,
 };
 
 use super::*;
@@ -40,7 +41,13 @@ pub(super) fn require_platform_owner(
     Ok(())
 }
 
-/// Reads the tombstone subjects of a request while their rows and links still exist.
+/// Reads the tombstone subjects of a request while their rows and observations still exist.
+///
+/// The subjects are the deleted raw archives, every conversation and project the request removes,
+/// and the Knowledge-linked Artifacts (XR-021 CONTRACTS.md S07). A conversation or project is
+/// tombstoned whether or not Knowledge analysed it: its facts announced it, so its removal must be
+/// announced too. It is tombstoned under the earliest deleted archive that observed it, which is
+/// the archive its first fact carried.
 pub(super) async fn collect_subjects(
     transaction: &mut Transaction<'_, Postgres>,
     request_id: Uuid,
@@ -54,17 +61,40 @@ pub(super) async fn collect_subjects(
     .bind(request_id)
     .fetch_all(&mut **transaction)
     .await?;
-    let linked: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "select distinct l.ai_archive_id, l.subject_kind, l.subject_id
-         from claude_archive.knowledge_analysis_links l
-         join claude_archive.privacy_deletion_items i
-           on i.subject_id = l.subject_id and i.item_kind = 'downstream_tombstone'
-          and i.action = 'emit_tombstone'
-         where i.request_id = $1 order by 1, 2, 3",
+    let removed: Vec<(String, String, Option<Uuid>)> = sqlx::query_as(
+        "select r.item_kind, r.subject_id,
+                (select e.ai_archive_id
+                 from claude_archive.export_observations o
+                 join claude_archive.exports e on e.export_id = o.export_id
+                 join claude_archive.privacy_deletion_items x
+                   on x.request_id = r.request_id and x.item_kind = 'raw_archive'
+                  and x.subject_id = e.export_id::text
+                 where o.subject_kind = r.item_kind and o.subject_id::text = r.subject_id
+                 order by e.export_id limit 1)
+         from claude_archive.privacy_deletion_items r
+         join claude_archive.privacy_deletion_items t
+           on t.request_id = r.request_id and t.item_kind = 'downstream_tombstone'
+          and t.action = 'emit_tombstone' and t.subject_id = r.subject_id
+         where r.request_id = $1 and r.item_kind in ('conversation', 'project')
+           and r.action = 'remove_record'
+         group by r.request_id, r.item_kind, r.subject_id
+         order by r.item_kind, r.subject_id",
     )
     .bind(request_id)
     .fetch_all(&mut **transaction)
     .await?;
+    let linked: Vec<(Uuid, String)> = sqlx::query_as(
+        "select distinct l.ai_archive_id, l.subject_id
+         from claude_archive.knowledge_analysis_links l
+         join claude_archive.privacy_deletion_items i
+           on i.subject_id = l.subject_id and i.item_kind = 'downstream_tombstone'
+          and i.action = 'emit_tombstone'
+         where i.request_id = $1 and l.subject_kind = 'artifact' order by 1, 2",
+    )
+    .bind(request_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let first_archive = archives.first().copied();
     let mut subjects: Vec<TombstoneSubject> = archives
         .into_iter()
         .map(|ai_archive_id| TombstoneSubject {
@@ -72,24 +102,33 @@ pub(super) async fn collect_subjects(
             subject: AiArchiveTombstoneSubject::Archive,
         })
         .collect();
-    for (ai_archive_id, kind, subject_id) in linked {
-        let subject = match kind.as_str() {
-            "conversation" => Uuid::parse_str(&subject_id).ok().map(|id| {
-                AiArchiveTombstoneSubject::Conversation {
-                    ai_conversation_id: AiConversationId(id),
-                }
-            }),
-            "artifact" => EntityLocalId::parse(&subject_id).ok().map(|external| {
-                AiArchiveTombstoneSubject::Artifact {
-                    external_artifact_id: external,
-                }
-            }),
-            _ => None,
+    for (kind, subject_id, observed_in) in removed {
+        let Some(ai_archive_id) = observed_in.or(first_archive) else {
+            continue;
         };
-        if let Some(subject) = subject {
+        let Ok(id) = Uuid::parse_str(&subject_id) else {
+            continue;
+        };
+        let subject = match kind.as_str() {
+            "conversation" => AiArchiveTombstoneSubject::Conversation {
+                ai_conversation_id: AiConversationId(id),
+            },
+            _ => AiArchiveTombstoneSubject::Project {
+                ai_project_id: AiProjectId(id),
+            },
+        };
+        subjects.push(TombstoneSubject {
+            ai_archive_id,
+            subject,
+        });
+    }
+    for (ai_archive_id, subject_id) in linked {
+        if let Ok(external) = EntityLocalId::parse(&subject_id) {
             subjects.push(TombstoneSubject {
                 ai_archive_id,
-                subject,
+                subject: AiArchiveTombstoneSubject::Artifact {
+                    external_artifact_id: external,
+                },
             });
         }
     }

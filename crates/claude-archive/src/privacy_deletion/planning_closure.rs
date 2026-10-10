@@ -453,6 +453,15 @@ async fn add_downstream(
     for id in inbox {
         closure.remove(DeletionItemKind::Inbox, id, None);
     }
+    // Every removed conversation and project is tombstoned, linked to Knowledge or not.
+    for id in conversations.iter().chain(projects.iter()) {
+        closure.push(
+            DeletionItemKind::DownstreamTombstone,
+            id.to_string(),
+            DeletionAction::EmitTombstone,
+            None,
+        );
+    }
     let mut seen_subjects = BTreeSet::new();
     for (_, subject_id) in linked {
         if seen_subjects.insert(subject_id.clone()) {
