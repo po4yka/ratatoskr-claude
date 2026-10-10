@@ -13,12 +13,22 @@ use ratatoskr_identifiers::{
 };
 
 use super::*;
+use crate::contract_projection::{Deletion, Survivors, reannounce};
 use crate::{ArchiveEventError, ArchiveOutbox};
 
 /// One subject that needs a downstream tombstone, read before its rows are deleted.
 pub(super) struct TombstoneSubject {
     ai_archive_id: Uuid,
     subject: AiArchiveTombstoneSubject,
+}
+
+/// The archives a set of tombstone subjects deletes.
+pub(super) fn deleted_archives(subjects: &[TombstoneSubject]) -> Vec<Uuid> {
+    subjects
+        .iter()
+        .filter(|subject| matches!(subject.subject, AiArchiveTombstoneSubject::Archive))
+        .map(|subject| subject.ai_archive_id)
+        .collect()
 }
 
 /// Rejects a plan that must tombstone but whose tenant reference is not a Platform user.
@@ -186,4 +196,52 @@ pub(super) async fn enqueue_tombstones(
         }
     }
     Ok(inserted)
+}
+
+/// Announces again, after the archive tombstones, every project, conversation and Artifact that
+/// stays because a retained export also observed it.
+///
+/// Their facts were announced under an archive this request tombstones, and Knowledge drops
+/// everything announced under a tombstoned archive. The survivors are the request's
+/// `retain_evidenced` items; the facts are enqueued in the row-removal transaction, so the
+/// tombstone and the repair commit together (XR-021 CONTRACTS.md S07).
+pub(super) async fn reannounce_survivors(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &super::rows::DurableDeletionRequest,
+    request_id: Uuid,
+    archives: &[Uuid],
+    tombstoned_at: WireTimestamp,
+) -> Result<usize, PrivacyDeletionExecutionError> {
+    let Ok(owner) = TenantRef::parse(&request.tenant_ref) else {
+        return Ok(0);
+    };
+    if archives.is_empty() {
+        return Ok(0);
+    }
+    let retained: Vec<(String, String)> = sqlx::query_as(
+        "select item_kind, subject_id from claude_archive.privacy_deletion_items
+         where request_id = $1 and action = 'retain_evidenced'
+           and item_kind in ('project', 'conversation', 'artifact')
+         order by item_kind, subject_id",
+    )
+    .bind(request_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut survivors = Survivors::default();
+    for (kind, subject_id) in retained {
+        let Ok(id) = Uuid::parse_str(&subject_id) else {
+            continue;
+        };
+        match kind.as_str() {
+            "project" => survivors.projects.push(id),
+            "conversation" => survivors.conversations.push(id),
+            _ => survivors.artifacts.push(id),
+        }
+    }
+    let deletion = Deletion {
+        owner,
+        archives,
+        tombstoned_at,
+    };
+    Ok(reannounce(transaction, &deletion, &survivors).await?)
 }

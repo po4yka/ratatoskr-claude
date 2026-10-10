@@ -142,12 +142,23 @@ impl PrivacyDeletionExecutor {
         retain_blobs_still_referenced(&mut transaction, request_id).await?;
 
         let removed_at = WireTimestamp::now();
+        let archives = super::tombstones::deleted_archives(&subjects);
         super::tombstones::enqueue_tombstones(
             &mut transaction,
             &request,
             request_id,
             subjects,
             evidence,
+            removed_at,
+        )
+        .await?;
+        // Knowledge drops what was announced under a tombstoned archive, so what a retained export
+        // still holds is announced again, after the tombstone.
+        super::tombstones::reannounce_survivors(
+            &mut transaction,
+            &request,
+            request_id,
+            &archives,
             removed_at,
         )
         .await?;

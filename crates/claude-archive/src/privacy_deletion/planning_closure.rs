@@ -473,7 +473,7 @@ async fn add_downstream(
             );
         }
     }
-    let aggregates: Vec<String> = conversations
+    let mut aggregates: Vec<String> = conversations
         .iter()
         .map(|id| format!("ai_conversation:{id}"))
         .chain(projects.iter().map(|id| format!("ai_project:{id}")))
@@ -483,6 +483,7 @@ async fn add_downstream(
                 .map(|(_, external)| format!("artifact:{external}")),
         )
         .collect();
+    aggregates.extend(archive_aggregates(transaction, closure).await?);
     if aggregates.is_empty() {
         return Ok(());
     }
@@ -500,4 +501,33 @@ async fn add_downstream(
         closure.remove(DeletionItemKind::Outbox, id, None);
     }
     Ok(())
+}
+
+/// The archive aggregates of the exports the scope deletes. Their import heads name a
+/// `source_export` whose bytes the deletion erases, so the heads leave the outbox with them.
+async fn archive_aggregates(
+    transaction: &mut Transaction<'_, Postgres>,
+    closure: &Closure<'_>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let exports: Vec<Uuid> = closure
+        .items
+        .iter()
+        .filter(|item| item.kind == DeletionItemKind::RawArchive)
+        .filter_map(|item| Uuid::parse_str(&item.subject_id).ok())
+        .collect();
+    let archives = ids(
+        transaction,
+        "select distinct ai_archive_id from claude_archive.exports
+         where export_id = any($1) order by ai_archive_id",
+        &exports,
+    )
+    .await?;
+    Ok(archives
+        .into_iter()
+        .map(|id| {
+            ratatoskr_identifiers::AiArchiveId(id)
+                .as_entity_ref()
+                .to_string()
+        })
+        .collect())
 }

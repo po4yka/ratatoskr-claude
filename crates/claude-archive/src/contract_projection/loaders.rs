@@ -3,13 +3,13 @@
 
 use super::*;
 
-const CONVERSATION_ADDED: &str = "ai_archive.conversation.added.v1";
-const CONVERSATION_UPDATED: &str = "ai_archive.conversation.updated.v1";
-const PROJECT_ADDED: &str = "ai_archive.project.added.v1";
-const PROJECT_UPDATED: &str = "ai_archive.project.updated.v1";
-const ARTIFACT_ADDED: &str = "ai_archive.artifact.added.v1";
-const ARTIFACT_UPDATED: &str = "ai_archive.artifact.updated.v1";
-const ARCHIVE_IMPORTED: &str = "ai_archive.archive.imported.v1";
+pub(super) const CONVERSATION_ADDED: &str = "ai_archive.conversation.added.v1";
+pub(super) const CONVERSATION_UPDATED: &str = "ai_archive.conversation.updated.v1";
+pub(super) const PROJECT_ADDED: &str = "ai_archive.project.added.v1";
+pub(super) const PROJECT_UPDATED: &str = "ai_archive.project.updated.v1";
+pub(super) const ARTIFACT_ADDED: &str = "ai_archive.artifact.added.v1";
+pub(super) const ARTIFACT_UPDATED: &str = "ai_archive.artifact.updated.v1";
+pub(super) const ARCHIVE_IMPORTED: &str = "ai_archive.archive.imported.v1";
 const ROLE_WARNING_CODE: &str = "ai_archive.message_role_unrepresentable";
 
 type MessageRow = (
@@ -50,7 +50,7 @@ type ArtifactRow = (
     Option<String>,
 );
 
-const TIMESTAMP_TEXT: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'";
+pub(super) const TIMESTAMP_TEXT: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'";
 
 pub(super) struct ProjectRecord {
     pub(super) project: AiProject,
@@ -62,6 +62,7 @@ pub(super) async fn load_projects(
     export_id: Uuid,
     provider: &AiProvider,
     omitted: &mut Omitted,
+    only: Option<&[Uuid]>,
 ) -> Result<Vec<ProjectRecord>, ReparseError> {
     let rows: Vec<ProjectRow> = sqlx::query_as(
         "select p.project_id, p.external_project_id, p.title, p.description, p.instructions,
@@ -69,9 +70,11 @@ pub(super) async fn load_projects(
          from claude_archive.projects p
          join claude_archive.export_observations o
            on o.subject_kind = 'project' and o.subject_id = p.project_id
-         where o.export_id = $1 order by p.external_project_id",
+         where o.export_id = $1 and ($2::uuid[] is null or p.project_id = any($2))
+         order by p.external_project_id",
     )
     .bind(export_id)
+    .bind(only)
     .fetch_all(&mut **transaction)
     .await?;
     let mut records = Vec::new();
@@ -134,9 +137,18 @@ enum Decision {
 /// A provider Artifact id such as `react-component` is minted per conversation or project, so it
 /// recurs inside one tenant and the aggregate (`artifact:<id>`) alone cannot say which Artifact an
 /// earlier fact described. The scope refs are what the wire carries to separate them.
-struct ArtifactScope {
+pub(super) struct ArtifactScope {
     conversation_ref: Option<String>,
     project_ref: Option<String>,
+}
+
+impl ArtifactScope {
+    pub(super) fn of(artifact: &AiArtifact) -> Self {
+        Self {
+            conversation_ref: artifact.conversation_ref.as_ref().map(ToString::to_string),
+            project_ref: artifact.project_ref.as_ref().map(ToString::to_string),
+        }
+    }
 }
 
 /// The latest fact already enqueued for one identity of one tenant.
@@ -145,7 +157,7 @@ struct ArtifactScope {
 /// id recurs across tenants) must not decide whether this tenant's subject is new. An Artifact
 /// lookup additionally matches the scope, so two Artifacts that share an id are not each other's
 /// previous revision.
-async fn latest_envelope(
+pub(super) async fn latest_envelope(
     transaction: &mut Transaction<'_, Postgres>,
     owner: TenantRef,
     aggregate_type: &str,
@@ -256,6 +268,7 @@ pub(super) async fn load_conversations(
     owner: TenantRef,
     provider: &AiProvider,
     omitted: &mut Omitted,
+    only: Option<&[Uuid]>,
 ) -> Result<Vec<AiConversation>, ReparseError> {
     let rows: Vec<ConversationRow> = sqlx::query_as(&format!(
         "select c.conversation_id, c.external_conversation_id, c.title, c.project_id,
@@ -264,9 +277,11 @@ pub(super) async fn load_conversations(
          from claude_archive.conversations c
          join claude_archive.export_observations o
            on o.subject_kind = 'conversation' and o.subject_id = c.conversation_id
-         where o.export_id = $1 order by c.external_conversation_id"
+         where o.export_id = $1 and ($2::uuid[] is null or c.conversation_id = any($2))
+         order by c.external_conversation_id"
     ))
     .bind(export_id)
+    .bind(only)
     .fetch_all(&mut **transaction)
     .await?;
     let mut conversations = Vec::new();
@@ -508,6 +523,7 @@ pub(super) async fn load_artifacts(
     owner: TenantRef,
     provider: &AiProvider,
     omitted: &mut Omitted,
+    only: Option<&[Uuid]>,
 ) -> Result<Vec<ArtifactRecord>, ReparseError> {
     let rows: Vec<ArtifactRow> = sqlx::query_as(
         "select a.artifact_id, a.external_artifact_id, a.title,
@@ -517,9 +533,11 @@ pub(super) async fn load_artifacts(
          left join claude_archive.messages m on m.message_id = a.message_id
          join claude_archive.export_observations o
            on o.subject_kind = 'artifact' and o.subject_id = a.artifact_id
-         where o.export_id = $1 order by a.external_artifact_id",
+         where o.export_id = $1 and ($2::uuid[] is null or a.artifact_id = any($2))
+         order by a.external_artifact_id",
     )
     .bind(export_id)
+    .bind(only)
     .fetch_all(&mut **transaction)
     .await?;
     let mut records = Vec::new();
@@ -598,10 +616,7 @@ pub(super) async fn artifact_fact(
     let aggregate = EntityRef::parse(&format!("artifact:{}", artifact.external_artifact_id))
         .map_err(|_| ArchiveEventError::Identifier)?
         .to_string();
-    let scope = ArtifactScope {
-        conversation_ref: artifact.conversation_ref.as_ref().map(ToString::to_string),
-        project_ref: artifact.project_ref.as_ref().map(ToString::to_string),
-    };
+    let scope = ArtifactScope::of(&artifact);
     let latest = latest_envelope(
         transaction,
         artifact.owner,

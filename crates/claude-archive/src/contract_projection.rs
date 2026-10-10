@@ -33,6 +33,7 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 mod loaders;
+mod reannounce;
 
 use crate::events::contract_blob_ref;
 use crate::{
@@ -43,6 +44,7 @@ use loaders::{
     artifact_fact, conversation_fact, head_already_announced, load_artifacts, load_conversations,
     load_projects, project_fact,
 };
+pub(crate) use reannounce::{Deletion, Survivors, reannounce};
 
 /// What the import head needs to know about the report the caller just persisted.
 #[derive(Debug, Clone)]
@@ -272,7 +274,9 @@ impl ImportProjection<'_> {
         let source_export = contract_blob_ref(self.raw)?;
         let mut subjects = Vec::new();
         let mut omitted = Omitted::default();
-        for project in load_projects(transaction, self.export_id, &provider, &mut omitted).await? {
+        for project in
+            load_projects(transaction, self.export_id, &provider, &mut omitted, None).await?
+        {
             if let Some(fact) = project_fact(
                 transaction,
                 self.provenance(
@@ -289,8 +293,15 @@ impl ImportProjection<'_> {
                 subjects.push(fact);
             }
         }
-        let conversations =
-            load_conversations(transaction, self.export_id, owner, &provider, &mut omitted).await?;
+        let conversations = load_conversations(
+            transaction,
+            self.export_id,
+            owner,
+            &provider,
+            &mut omitted,
+            None,
+        )
+        .await?;
         let counts = (
             u32::try_from(conversations.len()).unwrap_or(u32::MAX),
             conversations
@@ -318,28 +329,15 @@ impl ImportProjection<'_> {
                 subjects.push(fact);
             }
         }
-        for artifact in
-            load_artifacts(transaction, self.export_id, owner, &provider, &mut omitted).await?
-        {
-            if let Some(fact) = artifact_fact(
+        subjects.extend(
+            self.artifact_facts(
                 transaction,
-                self.provenance(
-                    owner,
-                    &provider,
-                    &source_export,
-                    imported_at,
-                    &(
-                        artifact.parser_name.clone(),
-                        artifact.parser_version.clone(),
-                    ),
-                ),
-                artifact,
+                (owner, &provider),
+                (&source_export, imported_at),
+                &mut omitted,
             )
-            .await?
-            {
-                subjects.push(fact);
-            }
-        }
+            .await?,
+        );
         // An omission alone is reason enough to re-announce the head: it is the only place the
         // loss is visible.
         if subjects.is_empty() && !self.head_always && omitted.is_empty() {
@@ -363,6 +361,30 @@ impl ImportProjection<'_> {
             ArchiveOutbox::enqueue_in(transaction, &fact, WireTimestamp::now()).await?;
         }
         Ok(omitted)
+    }
+
+    /// The Artifact facts of the export that changed, in the order the import announces them.
+    async fn artifact_facts(
+        &self,
+        transaction: &mut Transaction<'_, Postgres>,
+        (owner, provider): (TenantRef, &AiProvider),
+        (source_export, imported_at): (&ratatoskr_identifiers::BlobRef, WireTimestamp),
+        omitted: &mut Omitted,
+    ) -> Result<Vec<ArchiveEventFact>, ReparseError> {
+        let mut facts = Vec::new();
+        for artifact in
+            load_artifacts(transaction, self.export_id, owner, provider, omitted, None).await?
+        {
+            let stamp = (
+                artifact.parser_name.clone(),
+                artifact.parser_version.clone(),
+            );
+            let provenance = self.provenance(owner, provider, source_export, imported_at, &stamp);
+            if let Some(fact) = artifact_fact(transaction, provenance, artifact).await? {
+                facts.push(fact);
+            }
+        }
+        Ok(facts)
     }
 
     fn provenance(

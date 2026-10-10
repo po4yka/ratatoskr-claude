@@ -182,10 +182,9 @@ async fn a_tenant_deletion_tombstones_every_unlinked_conversation_and_project() 
 /// The edge `design.md` names: a conversation another export also observed survives the deletion
 /// of one export, so it is not tombstoned by itself, while the deleted archive is.
 ///
-/// The archive tombstone is what the deleted export owes Knowledge. Whether Knowledge then drops
-/// the retained conversation, which was announced under the deleted archive id, is Knowledge's
-/// behaviour and is recorded as an open decision for the owner; this test pins what the archive
-/// side emits so a change of that behaviour is deliberate.
+/// Dropping the survivor from Knowledge is prevented by announcing it again under the retained
+/// export; `privacy_deletion_survivors.rs` proves that against real imports. The rows seeded here
+/// were never announced, so there is no earlier fact to repeat and none is emitted.
 #[tokio::test]
 async fn a_conversation_retained_by_another_export_is_not_tombstoned_by_itself() {
     let root = temp_root("tombstone-retained");
@@ -233,6 +232,13 @@ async fn a_conversation_retained_by_another_export_is_not_tombstoned_by_itself()
         .finalize_with_blob_store(request, &store, &resolved(&[&raw]), None)
         .await;
     let subjects = tombstoned(db.database.pool()).await;
+    let announcements: i64 = sqlx::query_scalar(
+        "select count(*) from claude_archive.outbox_events
+         where event_type like 'ai_archive.%.added.v1' or event_type like 'ai_archive.%.updated.v1'",
+    )
+    .fetch_one(db.database.pool())
+    .await
+    .expect("the announcement count is readable");
     let conversation_rows: i64 = sqlx::query_scalar(
         "select count(*) from claude_archive.conversations where conversation_id = $1",
     )
@@ -245,6 +251,10 @@ async fn a_conversation_retained_by_another_export_is_not_tombstoned_by_itself()
 
     outcome.expect("the deletion completes");
     assert_eq!(conversation_rows, 1, "the retained conversation survives");
+    assert_eq!(
+        announcements, 0,
+        "a survivor that was never announced has nothing to announce again"
+    );
     assert_eq!(
         subjects,
         vec!["archive".to_owned(), format!("project:{PROJECT}")],
