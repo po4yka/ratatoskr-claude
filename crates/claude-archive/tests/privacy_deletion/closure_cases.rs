@@ -335,10 +335,6 @@ struct DependentFixture {
     shared_blob: Stored,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the dependent graph is one reviewed fixture"
-)]
 async fn seed_dependents(pool: &PgPool, store: &BlobStore) -> DependentFixture {
     let fixture = DependentFixture {
         raw: store_bytes(store, "application/zip", b"dependent raw archive"),
@@ -347,6 +343,15 @@ async fn seed_dependents(pool: &PgPool, store: &BlobStore) -> DependentFixture {
         part_blob: store_bytes(store, "image/png", b"exclusive content part bytes"),
         shared_blob: store_bytes(store, "text/plain", b"bytes a retained source also uses"),
     };
+    seed_account_and_exports(pool, &fixture).await;
+    seed_records_and_runs(pool).await;
+    seed_blob_carrying_rows(pool, &fixture).await;
+    seed_relations_and_observations(pool).await;
+    fixture
+}
+
+/// The account and its two raw exports.
+async fn seed_account_and_exports(pool: &PgPool, fixture: &DependentFixture) {
     sqlx::query(
         "insert into claude_archive.accounts (account_id, external_account_id) values ($1, 'dependent-owner')",
     )
@@ -378,6 +383,11 @@ async fn seed_dependents(pool: &PgPool, store: &BlobStore) -> DependentFixture {
         .await
         .expect("the export seeds");
     }
+}
+
+/// Projects, the conversation and its messages, and the import and reparse runs of the first
+/// export.
+async fn seed_records_and_runs(pool: &PgPool) {
     execute(
         "insert into claude_archive.projects (project_id, account_id, external_project_id, upstream_state)
          values ('b3000000-0000-0000-0000-0000000000b1', 'b1000000-0000-0000-0000-0000000000b1', 'removed-project', 'present'),
@@ -404,6 +414,10 @@ async fn seed_dependents(pool: &PgPool, store: &BlobStore) -> DependentFixture {
         pool,
     )
     .await;
+}
+
+/// The rows that carry blobs: project sources, content parts and a message asset.
+async fn seed_blob_carrying_rows(pool: &PgPool, fixture: &DependentFixture) {
     sqlx::query(
         "insert into claude_archive.project_sources
           (source_id, project_id, external_source_id, source_kind, blob_ref, locally_backed_up)
@@ -438,6 +452,10 @@ async fn seed_dependents(pool: &PgPool, store: &BlobStore) -> DependentFixture {
     .execute(pool)
     .await
     .expect("the message asset seeds");
+}
+
+/// The message relation and which export observed which project and message.
+async fn seed_relations_and_observations(pool: &PgPool) {
     execute(
         "insert into claude_archive.message_relations (relation_id, parent_message_id, child_message_id, relation_kind)
          values ('b4200000-0000-0000-0000-0000000000b1', 'b4100000-0000-0000-0000-0000000000b1',
@@ -452,7 +470,6 @@ async fn seed_dependents(pool: &PgPool, store: &BlobStore) -> DependentFixture {
         pool,
     )
     .await;
-    fixture
 }
 
 async fn dependents_remaining(pool: &PgPool) -> Vec<(String, i64)> {

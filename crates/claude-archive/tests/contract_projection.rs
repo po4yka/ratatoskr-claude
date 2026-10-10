@@ -258,49 +258,7 @@ fn payload<T: ratatoskr_event_envelope::EventPayload>(
         .collect()
 }
 
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one projection proof keeps every fact class visible"
-)]
-async fn the_persisted_import_is_projected_into_archive_facts() {
-    let imported = import_synthetic_export("projection-import", true).await;
-    let owner = TenantRef::parse(&format!("user:{PLATFORM_USER}")).expect("a user reference");
-
-    let emitted = facts(&imported.db.database).await;
-    let head: Vec<AiArchiveImport> = payload(&emitted, "ai_archive.archive.imported.v1");
-    let projects: Vec<AiProjectAdded> = payload(&emitted, "ai_archive.project.added.v1");
-    let conversations: Vec<AiConversationAdded> =
-        payload(&emitted, "ai_archive.conversation.added.v1");
-    let artifacts: Vec<AiArtifactAdded> = payload(&emitted, "ai_archive.artifact.added.v1");
-    let blob_exists = artifacts.iter().all(|added| {
-        let blob = &added.artifact.content_blob;
-        let reference = ratatoskr_claude_archive::BlobRef {
-            owner_service: blob.owner_service.to_string(),
-            algorithm: ratatoskr_claude_archive::DigestAlgorithm::Sha256,
-            digest_hex: blob.digest.hex.to_string(),
-            media_type: ratatoskr_claude_archive::MediaType::parse(blob.media_type.as_str())
-                .expect("media type"),
-            length_bytes: blob.length_bytes,
-        };
-        imported.store.verify(&reference).is_ok()
-    });
-    remove(&imported.root);
-    let account = imported.account;
-    let archive = imported.archive;
-    imported.db.cleanup().await.expect("cleanup succeeds");
-
-    assert_eq!(
-        types(&emitted),
-        vec![
-            "ai_archive.archive.imported.v1",
-            "ai_archive.project.added.v1",
-            "ai_archive.project.added.v1",
-            "ai_archive.conversation.added.v1",
-            "ai_archive.artifact.added.v1",
-        ],
-        "the import head comes first, then each project, conversation and Artifact"
-    );
+fn assert_head(head: &[AiArchiveImport], owner: TenantRef, archive: Uuid) {
     let head = head.first().expect("one import head");
     head.validate()
         .expect("the import head satisfies its invariants");
@@ -316,6 +274,10 @@ async fn the_persisted_import_is_projected_into_archive_facts() {
         u32::try_from(head.completeness_report.gaps.len()).expect("gap count fits"),
         "the gap count counts the gap entries"
     );
+}
+
+/// The projects by title, returning the garden project the conversation points at.
+fn assert_projects(projects: &[AiProjectAdded]) -> &AiProjectAdded {
     let titles: Vec<&str> = projects
         .iter()
         .map(|added| added.project.title.as_str())
@@ -337,6 +299,14 @@ async fn the_persisted_import_is_projected_into_archive_facts() {
     garden
         .validate()
         .expect("the project fact agrees with its provenance");
+    garden
+}
+
+fn assert_conversation(
+    conversations: &[AiConversationAdded],
+    owner: TenantRef,
+    garden: &AiProjectAdded,
+) {
     let conversation = conversations.first().expect("one conversation fact");
     conversation
         .validate()
@@ -375,6 +345,59 @@ async fn the_persisted_import_is_projected_into_archive_facts() {
         ),
         "text and markdown parts keep their order: {first_parts:?}"
     );
+}
+
+/// Whether every announced Artifact content blob exists in the blob store.
+fn artifact_blobs_exist(artifacts: &[AiArtifactAdded], store: &BlobStore) -> bool {
+    artifacts.iter().all(|added| {
+        let blob = &added.artifact.content_blob;
+        let reference = ratatoskr_claude_archive::BlobRef {
+            owner_service: blob.owner_service.to_string(),
+            algorithm: ratatoskr_claude_archive::DigestAlgorithm::Sha256,
+            digest_hex: blob.digest.hex.to_string(),
+            media_type: ratatoskr_claude_archive::MediaType::parse(blob.media_type.as_str())
+                .expect("media type"),
+            length_bytes: blob.length_bytes,
+        };
+        store.verify(&reference).is_ok()
+    })
+}
+
+#[tokio::test]
+async fn the_persisted_import_is_projected_into_archive_facts() {
+    let imported = import_synthetic_export("projection-import", true).await;
+    let owner = TenantRef::parse(&format!("user:{PLATFORM_USER}")).expect("a user reference");
+
+    let emitted = facts(&imported.db.database).await;
+    let artifacts: Vec<AiArtifactAdded> = payload(&emitted, "ai_archive.artifact.added.v1");
+    let blob_exists = artifact_blobs_exist(&artifacts, &imported.store);
+    remove(&imported.root);
+    let archive = imported.archive;
+    imported.db.cleanup().await.expect("cleanup succeeds");
+
+    assert_eq!(
+        types(&emitted),
+        vec![
+            "ai_archive.archive.imported.v1",
+            "ai_archive.project.added.v1",
+            "ai_archive.project.added.v1",
+            "ai_archive.conversation.added.v1",
+            "ai_archive.artifact.added.v1",
+        ],
+        "the import head comes first, then each project, conversation and Artifact"
+    );
+    assert_head(
+        &payload(&emitted, "ai_archive.archive.imported.v1"),
+        owner,
+        archive,
+    );
+    let projects: Vec<AiProjectAdded> = payload(&emitted, "ai_archive.project.added.v1");
+    let garden = assert_projects(&projects);
+    assert_conversation(
+        &payload(&emitted, "ai_archive.conversation.added.v1"),
+        owner,
+        garden,
+    );
     let artifact = artifacts.first().expect("one Artifact fact");
     assert_eq!(
         artifact.artifact.external_artifact_id.as_str(),
@@ -385,7 +408,6 @@ async fn the_persisted_import_is_projected_into_archive_facts() {
         blob_exists,
         "the Artifact content blob exists in the blob store"
     );
-    let _ = account;
 }
 
 #[tokio::test]
