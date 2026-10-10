@@ -18,7 +18,7 @@ use std::sync::Arc;
 use ratatoskr_claude_archive::blob_store::scratch::{remove, temp_root};
 use ratatoskr_claude_archive::test_support::TestDatabase;
 use ratatoskr_claude_archive::{
-    AcquisitionMode, ArchiveIdentity, BlobStore, ImportRunStore, OperationReportOutbox,
+    AcquisitionMode, ArchiveIdentity, BlobStore, ImportRunStore, OutboxPublisher,
     PlatformOperation, ReceiptError, ReceiptOutcome, TenantClaim,
 };
 use sqlx::Row as _;
@@ -800,7 +800,7 @@ async fn failed_operation_report_publication_leaves_the_outbox_row_pending() {
     .await
     .expect("the pending report inserts");
 
-    let publisher = OperationReportOutbox::new(db.database.pool().clone());
+    let publisher = OutboxPublisher::new(db.database.pool().clone());
     let missing_credentials = std::path::Path::new("/missing/claude-operation-report.nkey");
     let failure = publisher
         .publish_pending_once("nats://127.0.0.1:1", missing_credentials)

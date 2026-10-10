@@ -14,3 +14,13 @@ services:
       interval: 1s
       timeout: 5s
       retries: 30
+
+  # JetStream for the archive event pump tests (`CLAUDE_ARCHIVE_TEST_NATS_URL=nats://127.0.0.1:4238`).
+  # Pinned by digest like the CI step that runs the same broker: `nats:2.15.0-alpine` as it stood on
+  # 2026-10-10.
+  nats:
+    image: nats@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4
+    container_name: ratatoskr-claude-nats
+    command: ["-js"]
+    ports:
+      - "127.0.0.1:4238:4222"

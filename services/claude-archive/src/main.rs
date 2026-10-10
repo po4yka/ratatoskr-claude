@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ratatoskr_claude_archive::OperationReportOutbox;
+use ratatoskr_claude_archive::OutboxPublisher;
 use ratatoskr_claude_archive::blob_store::BlobStore;
 use ratatoskr_claude_archive::telemetry::SERVICE_NAME;
 use ratatoskr_claude_archive::{Config, Database, InitialImportWorker, ParserRegistry};
@@ -251,38 +251,36 @@ async fn tokio_main() -> Result<(), ExitCode> {
     })?;
 
     let runtime = Arc::new(RuntimeState::new());
-    let listener = tokio::net::TcpListener::bind(config.admin.listen_address)
-        .await
-        .map_err(|error| {
-            tracing::error!(
-                bind = %config.admin.listen_address,
-                %error,
-                "the operator listener could not bind"
-            );
-            ExitCode::FAILURE
-        })?;
+    let listener = bind_listener(config.admin.listen_address).await?;
 
     // The first probes happen before readiness flips, so the process never
     // reports itself ready over unverified dependencies.
     let prober = spawn_probers(database.clone(), blob_store.clone(), Arc::clone(&runtime));
-    let operation_reporter = start_operation_reporter(&config, &database, Arc::clone(&runtime));
+    let (operation_reporter, reporter_stopped) =
+        start_operation_reporter(&config, &database, Arc::clone(&runtime)).unzip();
     let initial_importer =
         start_initial_importer(&database, &blob_store, &config.limits, Arc::clone(&runtime))?;
     runtime.mark_startup_complete();
     tracing::info!(admin = %config.admin.listen_address, "startup complete");
 
     let metrics_handle = guard.metrics_handle();
-    let serve_result = serve_admin(
-        listener,
-        Arc::clone(&runtime),
-        database,
-        blob_store,
-        config.receipt.platform_accounts,
-        config.limits.max_archive_bytes,
-        move || metrics_handle.render(),
-        Duration::from_millis(config.limits.shutdown_timeout_ms),
-    )
-    .await;
+    // A publisher that stopped on a fatal error never recovers by retrying, so the process exits
+    // non-zero instead of serving as ready while archive events pile up unpublished.
+    let serve_result = tokio::select! {
+        result = serve_admin(
+            listener,
+            Arc::clone(&runtime),
+            database,
+            blob_store,
+            config.receipt.platform_accounts,
+            config.limits.max_archive_bytes,
+            move || metrics_handle.render(),
+            Duration::from_millis(config.limits.shutdown_timeout_ms),
+        ) => result,
+        () = publisher_stopped(reporter_stopped) => {
+            Err("the archive event publisher stopped on a fatal error".to_owned())
+        }
+    };
 
     prober.abort();
     if let Some(reporter) = operation_reporter {
@@ -302,28 +300,50 @@ async fn tokio_main() -> Result<(), ExitCode> {
     }
 }
 
-/// Delivers a bounded batch of durable terminal reports on each interval.
+async fn bind_listener(address: std::net::SocketAddr) -> Result<tokio::net::TcpListener, ExitCode> {
+    tokio::net::TcpListener::bind(address)
+        .await
+        .map_err(|error| {
+            tracing::error!(bind = %address, %error, "the operator listener could not bind");
+            ExitCode::FAILURE
+        })
+}
+
+/// Delivers a bounded batch of durable archive events on each interval.
 ///
-/// A failed pass is intentionally quiet about broker details: the outbox row
-/// remains pending and the next pass retries it with the same message ID.
+/// A failed pass is intentionally quiet about broker details: the outbox rows remain pending and
+/// the next pass retries them with the same message ID. A fatal error (a row the pump may never
+/// skip) ends the task and tells the process to exit.
 fn spawn_operation_reporter(
-    outbox: OperationReportOutbox,
+    outbox: OutboxPublisher,
     endpoint: String,
     nkey_seed_path: std::path::PathBuf,
     runtime: Arc<RuntimeState>,
+    stopped: tokio::sync::oneshot::Sender<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(OPERATION_REPORT_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let ready = outbox
+            match outbox
                 .publish_pending_once(&endpoint, &nkey_seed_path)
                 .await
-                .is_ok();
-            runtime.set_operation_report_publisher_ready(ready);
-            if !ready {
-                tracing::warn!("terminal operation report publication deferred");
+            {
+                Ok(_) => runtime.set_operation_report_publisher_ready(true),
+                Err(error) if error.is_fatal() => {
+                    runtime.set_operation_report_publisher_ready(false);
+                    tracing::error!(
+                        class = "fatal",
+                        "the archive event publisher cannot continue"
+                    );
+                    let _ignored = stopped.send(());
+                    return;
+                }
+                Err(_) => {
+                    runtime.set_operation_report_publisher_ready(false);
+                    tracing::warn!("archive event publication deferred");
+                }
             }
         }
     })
@@ -333,19 +353,35 @@ fn start_operation_reporter(
     config: &Config,
     database: &Database,
     runtime: Arc<RuntimeState>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<(
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+)> {
     let (endpoint, nkey_seed_path) = config
         .receipt
         .event_bus_url
         .as_ref()
         .zip(config.receipt.event_bus_nkey_seed_path.as_ref())?;
     runtime.set_operation_report_publisher_ready(false);
-    Some(spawn_operation_reporter(
-        OperationReportOutbox::new(database.pool().clone()),
+    let (stopped, stopped_receiver) = tokio::sync::oneshot::channel();
+    let handle = spawn_operation_reporter(
+        OutboxPublisher::new(database.pool().clone()),
         endpoint.expose_secret().to_owned(),
         nkey_seed_path.clone(),
         runtime,
-    ))
+        stopped,
+    );
+    Some((handle, stopped_receiver))
+}
+
+/// Resolves when the publisher task has ended; never resolves when none is configured.
+async fn publisher_stopped(stopped: Option<tokio::sync::oneshot::Receiver<()>>) {
+    match stopped {
+        Some(receiver) => {
+            let _ignored = receiver.await;
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 fn spawn_initial_importer(

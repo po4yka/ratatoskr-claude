@@ -38,6 +38,25 @@ pub fn admin_url() -> String {
     }
 }
 
+/// Where the event-pump tests find a JetStream-enabled broker.
+///
+/// There is no default: a skipped broker test proves nothing about delivery, so a missing
+/// `CLAUDE_ARCHIVE_TEST_NATS_URL` fails the test that needs it instead of passing silently.
+///
+/// # Panics
+///
+/// When the variable is unset.
+#[must_use]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::expect_used,
+    reason = "test-only broker location is not process configuration"
+)]
+pub fn nats_url() -> String {
+    std::env::var("CLAUDE_ARCHIVE_TEST_NATS_URL")
+        .expect("CLAUDE_ARCHIVE_TEST_NATS_URL must name a JetStream broker for the pump tests")
+}
+
 /// A connectable URL for one named disposable database on the same server
 /// as [`admin_url`], used when a test must reopen a database the way a fresh
 /// process would.

@@ -64,7 +64,7 @@ pub use external_reference::{
 pub use import_state::{ImportError, ImportRunStore, ImportState, TransitionOutcome};
 pub use initial_import::InitialImportWorker;
 pub use knowledge_link::{KnowledgeLinkError, KnowledgeLinkOutcome, KnowledgeLinkStore};
-pub use operation_outbox::OperationReportOutbox;
+pub use operation_outbox::{OutboxError, OutboxPublisher};
 pub use parser_migration::{
     ParserMigrationEntry, ParserMigrationEntryStatus, ParserMigrationPlan, ParserMigrationReport,
     ParserMigrationStatus,
