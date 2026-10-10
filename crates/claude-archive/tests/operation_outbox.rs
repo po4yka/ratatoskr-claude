@@ -254,3 +254,102 @@ async fn the_schema_refuses_an_event_type_outside_the_closed_list() {
         "a row the pump could not publish must be impossible to insert"
     );
 }
+
+/// A payload over the broker's `max_payload` (1 MiB by default) is refused by the publish call
+/// itself, so no acknowledgement can ever arrive for it: the refusal path of the pump, driven by a
+/// real broker.
+#[tokio::test]
+async fn a_refused_publish_backs_off_and_never_starves_the_rows_behind_it() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let outbox = ArchiveOutbox::new(&db.database);
+    let tombstone: AiArchiveTombstone =
+        serde_json::from_str(TOMBSTONE).expect("the tombstone fixture decodes");
+    let added: AiConversationAdded =
+        serde_json::from_str(CONVERSATION_ADDED).expect("the conversation fixture decodes");
+    let refused = outbox
+        .enqueue(
+            &ArchiveEventFact::Tombstoned(tombstone),
+            "2026-08-27T08:00:00Z".parse().expect("a canonical instant"),
+        )
+        .await
+        .expect("the tombstone is enqueued");
+    let deliverable = outbox
+        .enqueue(
+            &ArchiveEventFact::ConversationAdded(added),
+            "2026-08-27T09:00:00Z".parse().expect("a canonical instant"),
+        )
+        .await
+        .expect("the conversation fact is enqueued");
+    sqlx::query(
+        "update claude_archive.outbox_events
+         set envelope = jsonb_set(envelope, '{payload,padding}', to_jsonb(repeat('x', 2000000)))
+         where event_id = $1",
+    )
+    .bind(refused.envelope.event_id.0)
+    .execute(db.database.pool())
+    .await
+    .expect("the head row is padded past the broker payload limit");
+    let jetstream = connect().await;
+    let stream = events_stream(&jetstream).await;
+    let publisher = OutboxPublisher::new(db.database.pool().clone());
+
+    let first_pass = publisher.publish_pending_with(&jetstream).await;
+    let refused_row: (bool, i32, Option<String>, bool) = sqlx::query_as(
+        "select published_at is not null, attempt_count, last_error, next_attempt_at > now()
+         from claude_archive.outbox_events where event_id = $1",
+    )
+    .bind(refused.envelope.event_id.0)
+    .fetch_one(db.database.pool())
+    .await
+    .expect("the refused row is readable");
+    let delivered_row: bool = sqlx::query_scalar(
+        "select published_at is not null from claude_archive.outbox_events where event_id = $1",
+    )
+    .bind(deliverable.envelope.event_id.0)
+    .fetch_one(db.database.pool())
+    .await
+    .expect("the deliverable row is readable");
+    let on_the_bus = published_on(
+        &stream,
+        "evt.ai_archive.conversation.added.v1",
+        deliverable.envelope.event_id.0,
+    )
+    .await;
+    let second_pass = publisher.publish_pending_with(&jetstream).await;
+    db.cleanup().await.expect("cleanup succeeds");
+
+    assert!(
+        matches!(first_pass, Err(OutboxError::Broker(_))),
+        "a pass with a refused publish reports a non-fatal broker error: {first_pass:?}"
+    );
+    assert!(
+        first_pass.as_ref().is_err_and(|error| !error.is_fatal()),
+        "a refusal is retried, never fatal"
+    );
+    let (was_published, attempts, last_error, backed_off) = refused_row;
+    assert!(!was_published, "a refused row stays unpublished");
+    assert_eq!(attempts, 1, "the refused attempt is counted");
+    assert!(
+        matches!(last_error.as_deref(), Some("publish_failed" | "ack_failed")),
+        "the refusal records a safe error class, got {last_error:?}"
+    );
+    assert!(
+        backed_off,
+        "the refused row waits until a future attempt time"
+    );
+    assert!(
+        delivered_row,
+        "the row behind the refused one is published in the same pass"
+    );
+    assert_eq!(
+        on_the_bus,
+        vec![deliverable.envelope],
+        "the deliverable envelope reached the bus unchanged"
+    );
+    assert!(
+        matches!(second_pass, Ok(0)),
+        "the backed-off row is not offered again before its time: {second_pass:?}"
+    );
+}
