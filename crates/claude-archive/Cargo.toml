@@ -16,6 +16,7 @@ ratatoskr-error-contracts.workspace = true
 ratatoskr-identifiers.workspace = true
 ratatoskr-operation-contracts.workspace = true
 ratatoskr-event-envelope.workspace = true
+nkeys = { version = "0.4.5", optional = true }
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -29,7 +30,7 @@ uuid.workspace = true
 zip.workspace = true
 
 [features]
-test-support = []
+test-support = ["dep:nkeys"]
 
 [dev-dependencies]
 # Self-dependency so integration tests see the test-support module while the
@@ -37,7 +38,6 @@ test-support = []
 ratatoskr-claude-archive = { path = ".", features = ["test-support"] }
 futures-util.workspace = true
 sha2.workspace = true
-nkeys = "0.4.5"
 
 [lints]
 workspace = true

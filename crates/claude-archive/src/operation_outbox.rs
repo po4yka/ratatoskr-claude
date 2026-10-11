@@ -91,11 +91,14 @@ const PENDING_SQL: &str = "select event_id, event_type, envelope from claude_arc
 
 /// The local outbox publisher for every archive event.
 ///
-/// Clones share one lazily created broker connection (XR-021 CONTRACTS.md R3-07 rule 1).
+/// Clones share one lazily created broker connection (XR-021 CONTRACTS.md R3-07 rule 1). A
+/// connection that failed a pass is dropped, so the next pass reads the nkey seed file again and
+/// a rotated seed takes effect without a restart.
 #[derive(Debug, Clone)]
 pub struct OutboxPublisher {
     pool: sqlx::PgPool,
     connection: Arc<tokio::sync::Mutex<Option<HeldConnection>>>,
+    failing: Arc<AtomicBool>,
 }
 
 impl OutboxPublisher {
@@ -105,7 +108,19 @@ impl OutboxPublisher {
         Self {
             pool,
             connection: Arc::new(tokio::sync::Mutex::new(None)),
+            failing: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether the last pass that needed the broker succeeded.
+    ///
+    /// A publisher that has not needed the broker yet is healthy: a pass over an empty outbox
+    /// makes no network call and so learns nothing, and it neither sets nor clears a failure.
+    /// The failure stays until a later pass publishes through the broker, including every pass
+    /// that falls inside the retry delay of a refused row.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        !self.failing.load(Ordering::Acquire)
     }
 
     /// Drains the held broker connection, if any, and waits until the client reports itself
@@ -148,8 +163,8 @@ impl OutboxPublisher {
     ///
     /// A pass with nothing to publish returns `Ok(0)` before it touches the network. Otherwise
     /// it publishes through the publisher's one connection, opened on first need with the
-    /// `endpoint` and the nkey seed read from `nkey_seed_path`, and opened again only when the
-    /// client reports it closed.
+    /// `endpoint` and the nkey seed read from `nkey_seed_path`. It is opened again when the
+    /// client reports it closed and after any pass that failed, which reads the seed file again.
     ///
     /// # Errors
     ///
@@ -168,8 +183,20 @@ impl OutboxPublisher {
         if !pending {
             return Ok(0);
         }
-        let jetstream = self.jetstream(endpoint, nkey_seed_path).await?;
-        self.publish_pending_with(&jetstream).await
+        let result = async {
+            let jetstream = self.jetstream(endpoint, nkey_seed_path).await?;
+            self.publish_pending_with(&jetstream).await
+        }
+        .await;
+        match &result {
+            Ok(_) => self.failing.store(false, Ordering::Release),
+            Err(OutboxError::Broker(_) | OutboxError::BrokerTimeout) => {
+                self.failing.store(true, Ordering::Release);
+                *self.connection.lock().await = None;
+            }
+            Err(_) => {}
+        }
+        result
     }
 
     /// The `JetStream` context of the held connection, which is created or replaced when absent

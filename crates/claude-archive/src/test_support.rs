@@ -4,6 +4,10 @@
 //! behaviors worth testing here — constraint refusal, catalog shape,
 //! re-application — need a database whose contents no other test has touched.
 
+mod broker;
+
+pub use broker::Broker;
+
 use sqlx::Executor as _;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;

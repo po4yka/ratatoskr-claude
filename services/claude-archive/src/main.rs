@@ -362,7 +362,7 @@ fn spawn_operation_reporter(
                 .publish_pending_once(&endpoint, &nkey_seed_path)
                 .await
             {
-                Ok(_) => runtime.set_operation_report_publisher_ready(true),
+                Ok(_) => runtime.set_operation_report_publisher_ready(outbox.is_healthy()),
                 Err(error) if error.is_fatal() => {
                     runtime.set_operation_report_publisher_ready(false);
                     tracing::error!(

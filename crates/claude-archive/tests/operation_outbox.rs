@@ -9,17 +9,14 @@
     reason = "integration-test scaffolding: a failed setup step must fail the test loudly"
 )]
 
-mod support;
-
 use std::time::Duration;
 
 use async_nats::jetstream::consumer::{DeliverPolicy, pull};
 use futures_util::StreamExt as _;
 use ratatoskr_ai_archive_contracts::{AiArchiveTombstone, AiConversationAdded};
-use ratatoskr_claude_archive::test_support::{TestDatabase, nats_url};
+use ratatoskr_claude_archive::test_support::{Broker, TestDatabase, nats_url};
 use ratatoskr_claude_archive::{ArchiveEventFact, ArchiveOutbox, OutboxError, OutboxPublisher};
 use ratatoskr_event_envelope::EventEnvelope;
-use support::Broker;
 use uuid::Uuid;
 
 const EVENTS_STREAM: &str = "ratatoskr_events";

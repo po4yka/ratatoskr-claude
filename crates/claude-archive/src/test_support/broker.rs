@@ -6,12 +6,6 @@
 //! step `Put nats-server on PATH` copies it out of the pinned container); a missing binary fails
 //! the test, it never skips it.
 
-#![allow(
-    dead_code,
-    unreachable_pub,
-    reason = "each test binary compiles this module and uses a different subset of it"
-)]
-
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -91,6 +85,10 @@ fn service_stanza(public_key: &str) -> Result<String, Box<dyn std::error::Error>
 impl Broker {
     /// A broker without authorization, for the tests that count connections. `service_seed` still
     /// names a valid seed file, because the pump reads one whatever the server asks for.
+    ///
+    /// # Errors
+    ///
+    /// When the server binary is missing or does not start listening in time.
     pub fn open() -> Result<Self, Box<dyn std::error::Error>> {
         let mut broker = Self::start("", None)?;
         broker.service_seed = write_seed(
@@ -102,6 +100,10 @@ impl Broker {
     }
 
     /// A broker whose only users are a setup user and the reviewed Claude stanza.
+    ///
+    /// # Errors
+    ///
+    /// When the server binary is missing, the identity fragment cannot be read, or the server does not start listening in time.
     pub fn authorized() -> Result<Self, Box<dyn std::error::Error>> {
         let admin = nkeys::KeyPair::new_user();
         let service = nkeys::KeyPair::new_user();
@@ -186,18 +188,38 @@ impl Broker {
     }
 
     /// Starts the stopped server again on the same ports and store.
+    ///
+    /// # Errors
+    ///
+    /// When the server does not start listening again in time.
     pub fn restart(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.stop();
         self.spawn()
     }
 
+    /// Replaces the service seed file with a fresh key the broker does not authorize, as a
+    /// rotation that was applied to the file before it reached the broker would.
+    ///
+    /// # Errors
+    ///
+    /// When the seed file cannot be written.
+    pub fn rotate_service_seed(&self) -> Result<(), Box<dyn std::error::Error>> {
+        write_seed(&self.directory, "service.nkey", &nkeys::KeyPair::new_user())?;
+        Ok(())
+    }
+
     /// The endpoint services connect to.
+    #[must_use]
     pub fn url(&self) -> String {
         format!("nats://127.0.0.1:{}", self.port)
     }
 
     /// How many client connections the server accepted since it started, read from its
     /// monitoring endpoint.
+    ///
+    /// # Errors
+    ///
+    /// When the monitoring endpoint cannot be read or does not report a connection count.
     pub fn total_connections(&self) -> Result<u64, Box<dyn std::error::Error>> {
         let mut stream = TcpStream::connect(("127.0.0.1", self.monitor_port))?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -215,6 +237,10 @@ impl Broker {
     }
 
     /// A client of the setup user (or of the open broker), used to provision streams.
+    ///
+    /// # Errors
+    ///
+    /// When the seed file cannot be read or the connection is refused.
     pub async fn admin_client(&self) -> Result<async_nats::Client, Box<dyn std::error::Error>> {
         if self.admin_seed.as_os_str().is_empty() {
             return Ok(async_nats::connect(self.url()).await?);
@@ -228,6 +254,10 @@ impl Broker {
     }
 
     /// Creates the stream the archive facts are published into, as Edge does.
+    ///
+    /// # Errors
+    ///
+    /// When the setup user cannot connect or the stream cannot be created.
     pub async fn provision_events_stream(&self) -> Result<(), Box<dyn std::error::Error>> {
         let client = self.admin_client().await?;
         async_nats::jetstream::new(client.clone())

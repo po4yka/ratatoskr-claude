@@ -7,12 +7,9 @@
 //! the reply to a `JetStream` publish, so the pass fails. The tests need `nats-server` on `PATH`;
 //! a missing binary fails them, it never skips them.
 
-mod support;
-
 use ratatoskr_ai_archive_contracts::AiConversationAdded;
-use ratatoskr_claude_archive::test_support::TestDatabase;
+use ratatoskr_claude_archive::test_support::{Broker, TestDatabase};
 use ratatoskr_claude_archive::{ArchiveEventFact, ArchiveOutbox, OutboxPublisher};
-use support::Broker;
 
 const CONVERSATION_ADDED: &str = r#"{
   "import_provenance":{"ai_archive_id":"018f0000-0000-7000-8000-000000000401","provider":"claude","owner":"user:018f0000-0000-7000-8000-000000000005","source_export":{"owner_service":"ratatoskr-claude","digest":{"algorithm":"sha256","hex":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"media_type":"application/zip","length_bytes":1048576},"imported_at":"2026-08-27T08:00:00Z","parser_name":"claude_export","parser_version":"2026.08.1"},

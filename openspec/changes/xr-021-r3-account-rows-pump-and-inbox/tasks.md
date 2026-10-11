@@ -13,16 +13,19 @@ A dependency pin: no failing test can precede it, the existing suite staying gre
 
 - [x] 3.1 RED: `crates/claude-archive/tests/operation_outbox.rs` adds `the_pump_opens_one_connection_for_many_passes`, `an_empty_pass_makes_no_network_call` and `the_pump_reconnects_after_the_connection_is_closed`; the first two fail because every pass connects.
 - [x] 3.2 GREEN: a lazily created, reused client with the existing connect bound.
+- [x] 3.3 RED: `crates/claude-archive/tests/pump_health.rs` adds `an_idle_publisher_is_healthy_and_a_failed_connect_is_not`, `an_empty_pass_during_a_backoff_keeps_the_failure_until_a_publish_succeeds` and `a_rotated_seed_is_used_after_a_failed_pass`; the first two fail because the publisher records no failure, the third because a held client keeps its old credentials.
+- [x] 3.4 GREEN: `OutboxPublisher::is_healthy`, dropping the held connection after a failed pass, and `main.rs` reporting readiness from `is_healthy`.
 
 ## 4. The first mapped receipt creates the account, an unmapped user is a 403 (R3-04 rule 1, R3-03 rule 3)
 
-- [x] 4.1 RED: `crates/claude-archive/tests/receipt.rs` adds `the_first_receipt_from_a_mapped_user_creates_the_account` and `a_tenant_token_receipt_still_requires_an_existing_account`; `services/claude-archive/tests/admin.rs` adds `an_unmapped_platform_user_is_forbidden_not_unauthenticated`, `malformed_claims_stay_unauthenticated`, `an_authorization_header_stays_unauthenticated` and `capabilities_still_carry_no_store`.
+- [x] 4.1 RED: `crates/claude-archive/tests/platform_account.rs` adds `the_first_receipt_from_a_mapped_user_creates_the_account` and `a_tenant_token_receipt_still_requires_an_existing_account`; `services/claude-archive/tests/admin.rs` adds `an_unmapped_platform_user_is_forbidden_not_unauthenticated`, `malformed_claims_stay_unauthenticated`, `an_authorization_header_stays_unauthenticated` and `capabilities_still_carry_no_store`.
 - [x] 4.2 GREEN: the account insert in the Platform receipt transaction and `Kind::AccountUnmapped`.
 
 ## 5. A failed import is reported for a duplicate and logged (R3-04 rule 2, R3-07 rule 2)
 
-- [x] 5.1 RED: `crates/claude-archive/tests/import_state.rs` adds `a_second_upload_of_bytes_that_failed_permanently_is_reported_failed` and `a_permanent_import_failure_is_logged_with_a_class`.
+- [x] 5.1 RED: `crates/claude-archive/tests/import_failure.rs` adds `a_second_upload_of_bytes_that_failed_permanently_is_reported_failed` and `a_permanent_import_failure_is_logged_with_a_class`.
 - [x] 5.2 GREEN: the selector takes `failed` runs with an unreported bound operation; `mark_permanent_failure` logs.
+- [x] 5.3 The log assertion installs one process-wide subscriber (`set_global_default` behind a `OnceLock`) instead of a thread-local one: the thread-local form lost the event whenever the other test of the binary reached the same callsite first (reproduced as a failure on the first default-parallel run, 30 of 30 green after the change). Refactor only, no behaviour changes.
 
 ## 6. Provisioning and documentation (R3-11, R3-19)
 

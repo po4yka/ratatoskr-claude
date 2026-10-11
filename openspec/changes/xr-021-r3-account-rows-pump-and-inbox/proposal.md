@@ -11,7 +11,7 @@ Round 3 of changeset XR-021 fixes the defects that the Round 2 native smokes and
 ## What Changes
 
 - The service's NATS connection sets `custom_inbox_prefix("_INBOX_claude")`; `deploy/nats/identity.conf` carries the byte-equal `CLAUDE` stanza of Platform's `ratatoskr.conf`.
-- The outbox pump holds one lazily created client, makes no network call for an empty pass and replaces a closed client.
+- The outbox pump holds one lazily created client, makes no network call for an empty pass, replaces a closed client, drops a connection that failed a pass (so a rotated nkey seed is read again) and reports its own health to `/health/ready`.
 - The Platform receipt path inserts the mapped account in the receipt transaction; an unmapped Platform user answers `403 claude.account.unmapped` (`Kind::AccountUnmapped`); the tenant-token path still requires an existing account.
 - The import selector also takes `failed` runs with an unreported bound operation and enqueues the `failed` report; a permanent import failure is logged at WARN with a class and the run id.
 - `deploy/postgres/role.sql` provisions `ratatoskr_claude` on `ratatoskr`; the README, `DEVELOPMENT.md` and the example are corrected; every `ratatoskr-*` git dependency moves to contracts `ad16855c4e7f3d52cd118274faa3b8f3ab4da576`.
@@ -32,4 +32,4 @@ None.
 
 ## Impact
 
-Touches `operation_outbox.rs`, `receipt.rs`, `initial_import.rs`, `import_state.rs`, `services/claude-archive/src/fault.rs` and `lib.rs`, `Cargo.toml`, `Cargo.lock`, `deploy/nats/identity.conf`, `deploy/postgres/role.sql`, `deploy/systemd/claude.conf.example`, `.github/workflows/ci.yml`, `README.md` and `DEVELOPMENT.md`. The privacy deletion path, the organization receipt scope, the account-erasure transport and Platform's side of the receipt are out of scope.
+Touches `operation_outbox.rs`, `receipt.rs`, `initial_import.rs`, `test_support.rs` (the private-broker helper `Broker` moves into the `test-support` feature of the library), `services/claude-archive/src/fault.rs` and `lib.rs`, `Cargo.toml`, `Cargo.lock`, `deploy/nats/identity.conf`, `deploy/postgres/role.sql`, `deploy/systemd/claude.conf.example`, `.github/workflows/ci.yml`, `README.md` and `DEVELOPMENT.md`. The privacy deletion path, the organization receipt scope, the account-erasure transport and Platform's side of the receipt are out of scope.
