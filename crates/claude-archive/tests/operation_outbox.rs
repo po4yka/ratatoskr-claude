@@ -9,6 +9,8 @@
     reason = "integration-test scaffolding: a failed setup step must fail the test loudly"
 )]
 
+mod support;
+
 use std::time::Duration;
 
 use async_nats::jetstream::consumer::{DeliverPolicy, pull};
@@ -17,6 +19,7 @@ use ratatoskr_ai_archive_contracts::{AiArchiveTombstone, AiConversationAdded};
 use ratatoskr_claude_archive::test_support::{TestDatabase, nats_url};
 use ratatoskr_claude_archive::{ArchiveEventFact, ArchiveOutbox, OutboxError, OutboxPublisher};
 use ratatoskr_event_envelope::EventEnvelope;
+use support::Broker;
 use uuid::Uuid;
 
 const EVENTS_STREAM: &str = "ratatoskr_events";
@@ -548,5 +551,146 @@ async fn transient_refusals_never_make_a_row_undeliverable() {
     assert!(
         matches!(recovered, Ok(1)),
         "once the broker answers, the same row is published: {recovered:?}"
+    );
+}
+
+/// The conversation fixture under another provider conversation id, so each call is a new fact.
+fn conversation_fact(number: u32) -> ArchiveEventFact {
+    let added: AiConversationAdded = serde_json::from_str(
+        &CONVERSATION_ADDED.replace("conversation-001", &format!("conversation-{number}")),
+    )
+    .expect("the conversation fixture decodes");
+    ArchiveEventFact::ConversationAdded(added)
+}
+
+async fn enqueue_conversation(db: &TestDatabase, number: u32) {
+    ArchiveOutbox::new(&db.database)
+        .enqueue(
+            &conversation_fact(number),
+            "2026-08-27T08:00:01Z".parse().expect("a canonical instant"),
+        )
+        .await
+        .expect("the conversation fact is enqueued");
+}
+
+/// XR-021 CONTRACTS.md R3-07 rule 1: the pump holds one connection for its lifetime. Counting is
+/// done by the server (`total_connections`), not by the client, so a connection opened and closed
+/// inside one pass is seen.
+#[tokio::test]
+async fn the_pump_opens_one_connection_for_many_passes() {
+    let broker = Broker::open().expect("a private broker starts");
+    broker
+        .provision_events_stream()
+        .await
+        .expect("the events stream is provisioned");
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let pump = OutboxPublisher::new(db.database.pool().clone());
+    let before = broker
+        .total_connections()
+        .expect("the server counts connections");
+
+    let mut sent = 0;
+    for pass in 0..20 {
+        if pass % 2 == 0 {
+            enqueue_conversation(&db, pass).await;
+        }
+        sent += pump
+            .publish_pending_once(&broker.url(), &broker.service_seed)
+            .await
+            .expect("every pass succeeds");
+    }
+    let after = broker
+        .total_connections()
+        .expect("the server counts connections");
+    db.cleanup().await.expect("cleanup succeeds");
+
+    assert_eq!(sent, 10, "each non-empty pass published its one row");
+    assert!(
+        after - before <= 1,
+        "twenty passes, empty and non-empty, opened {} connections",
+        after - before
+    );
+}
+
+/// An empty outbox is the usual state, and a pass over it must not need the broker at all.
+#[tokio::test]
+async fn an_empty_pass_makes_no_network_call() {
+    let mut broker = Broker::open().expect("a private broker starts");
+    broker
+        .provision_events_stream()
+        .await
+        .expect("the events stream is provisioned");
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let publisher = OutboxPublisher::new(db.database.pool().clone());
+    enqueue_conversation(&db, 1).await;
+    let first = publisher
+        .publish_pending_once(&broker.url(), &broker.service_seed)
+        .await;
+    broker.stop();
+
+    let empty = tokio::time::timeout(
+        Duration::from_secs(1),
+        publisher.publish_pending_once(&broker.url(), &broker.service_seed),
+    )
+    .await;
+    db.cleanup().await.expect("cleanup succeeds");
+
+    assert!(
+        matches!(first, Ok(1)),
+        "the first pass publishes: {first:?}"
+    );
+    assert!(
+        matches!(empty, Ok(Ok(0))),
+        "an empty pass answers at once without the stopped broker: {empty:?}"
+    );
+}
+
+/// A closed client never recovers by itself, so the next pass must replace it; an open broker
+/// connection that is merely disconnected is async-nats's to repair.
+#[tokio::test]
+async fn the_pump_reconnects_after_the_connection_is_closed() {
+    let broker = Broker::open().expect("a private broker starts");
+    broker
+        .provision_events_stream()
+        .await
+        .expect("the events stream is provisioned");
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let publisher = OutboxPublisher::new(db.database.pool().clone());
+    let before = broker
+        .total_connections()
+        .expect("the server counts connections");
+    enqueue_conversation(&db, 1).await;
+    let first = publisher
+        .publish_pending_once(&broker.url(), &broker.service_seed)
+        .await;
+
+    publisher.close().await;
+    enqueue_conversation(&db, 2).await;
+    let second = publisher
+        .publish_pending_once(&broker.url(), &broker.service_seed)
+        .await;
+    let after = broker
+        .total_connections()
+        .expect("the server counts connections");
+    db.cleanup().await.expect("cleanup succeeds");
+
+    assert!(
+        matches!(first, Ok(1)),
+        "the first pass publishes: {first:?}"
+    );
+    assert!(
+        matches!(second, Ok(1)),
+        "the pass after the close publishes through a new connection: {second:?}"
+    );
+    assert_eq!(
+        after - before,
+        2,
+        "one connection before the close and one after"
     );
 }

@@ -11,8 +11,8 @@ A dependency pin: no failing test can precede it, the existing suite staying gre
 
 ## 3. One broker connection (R3-07 rule 1)
 
-- [ ] 3.1 RED: `crates/claude-archive/tests/operation_outbox.rs` adds `the_pump_opens_one_connection_for_many_passes`, `an_empty_pass_makes_no_network_call` and `the_pump_reconnects_after_the_connection_is_closed`; the first two fail because every pass connects.
-- [ ] 3.2 GREEN: a lazily created, reused client with the existing connect bound.
+- [x] 3.1 RED: `crates/claude-archive/tests/operation_outbox.rs` adds `the_pump_opens_one_connection_for_many_passes`, `an_empty_pass_makes_no_network_call` and `the_pump_reconnects_after_the_connection_is_closed`; the first two fail because every pass connects.
+- [x] 3.2 GREEN: a lazily created, reused client with the existing connect bound.
 
 ## 4. The first mapped receipt creates the account, an unmapped user is a 403 (R3-04 rule 1, R3-03 rule 3)
 

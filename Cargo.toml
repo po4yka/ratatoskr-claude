@@ -14,7 +14,7 @@ repository = "https://github.com/po4yka/ratatoskr-claude"
 
 [workspace.dependencies]
 ratatoskr-claude-archive = { version = "=0.1.0", path = "crates/claude-archive" }
-tokio     = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio     = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.19", features = ["io-util"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 axum      = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }

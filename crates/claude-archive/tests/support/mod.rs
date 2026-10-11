@@ -89,9 +89,16 @@ fn service_stanza(public_key: &str) -> Result<String, Box<dyn std::error::Error>
 }
 
 impl Broker {
-    /// A broker without authorization, for the tests that count connections.
+    /// A broker without authorization, for the tests that count connections. `service_seed` still
+    /// names a valid seed file, because the pump reads one whatever the server asks for.
     pub fn open() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::start("", None)
+        let mut broker = Self::start("", None)?;
+        broker.service_seed = write_seed(
+            &broker.directory,
+            "service.nkey",
+            &nkeys::KeyPair::new_user(),
+        )?;
+        Ok(broker)
     }
 
     /// A broker whose only users are a setup user and the reviewed Claude stanza.

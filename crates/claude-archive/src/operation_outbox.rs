@@ -5,6 +5,8 @@
 //! the broker acknowledged it. A refused row backs off and never starves the rows behind it; an
 //! event type outside the closed list is a hard error (XR-021 CONTRACTS.md S02 and S07).
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ratatoskr_event_envelope::EventEnvelope;
@@ -21,6 +23,8 @@ const INBOX_PREFIX: &str = "_INBOX_claude";
 const BATCH_SIZE: i64 = 32;
 /// A background retry must not wait forever for an unavailable broker.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long [`OutboxPublisher::close`] waits for the client to report that it is closed.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Room the broker needs beside the body for the subject and headers of one message.
 const HEADER_HEADROOM_BYTES: usize = 1024;
 /// The safe error class of a row whose body no publish can ever fit.
@@ -47,10 +51,36 @@ pub(crate) fn subject_for_event_type(event_type: &str) -> Option<&'static str> {
     })
 }
 
-/// The options of the one broker connection of this service: nkey authentication and the
-/// service's own inbox prefix.
-fn connect_options(seed: String) -> async_nats::ConnectOptions {
-    async_nats::ConnectOptions::with_nkey(seed).custom_inbox_prefix(INBOX_PREFIX)
+/// The options of the one broker connection of this service: nkey authentication, the service's
+/// own inbox prefix, and a callback that raises `closed` when the client has shut down for good.
+///
+/// async-nats repairs a lost connection by itself and never gives up reconnecting with the
+/// default `max_reconnects`, so `Event::Closed` (the client was drained or every handle dropped)
+/// is the one state it cannot recover from.
+fn connect_options(seed: String, closed: Arc<AtomicBool>) -> async_nats::ConnectOptions {
+    async_nats::ConnectOptions::with_nkey(seed)
+        .custom_inbox_prefix(INBOX_PREFIX)
+        .event_callback(move |event| {
+            let closed = Arc::clone(&closed);
+            async move {
+                if matches!(event, async_nats::Event::Closed) {
+                    closed.store(true, Ordering::Release);
+                }
+            }
+        })
+}
+
+/// The unpublished rows exist, by the same predicate as [`PENDING_SQL`].
+const HAS_PENDING_SQL: &str = "select exists (select 1 from claude_archive.outbox_events
+     where published_at is null and undeliverable_at is null
+       and (next_attempt_at is null or next_attempt_at <= now()))";
+
+/// The broker connection a publisher keeps for its lifetime.
+#[derive(Debug)]
+struct HeldConnection {
+    client: async_nats::Client,
+    jetstream: async_nats::jetstream::Context,
+    closed: Arc<AtomicBool>,
 }
 
 /// The unpublished rows a pass would offer next, oldest first.
@@ -60,16 +90,42 @@ const PENDING_SQL: &str = "select event_id, event_type, envelope from claude_arc
      order by occurred_at, event_id limit $1";
 
 /// The local outbox publisher for every archive event.
+///
+/// Clones share one lazily created broker connection (XR-021 CONTRACTS.md R3-07 rule 1).
 #[derive(Debug, Clone)]
 pub struct OutboxPublisher {
     pool: sqlx::PgPool,
+    connection: Arc<tokio::sync::Mutex<Option<HeldConnection>>>,
 }
 
 impl OutboxPublisher {
     /// Uses the archive service's established database pool.
     #[must_use]
     pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            connection: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Drains the held broker connection, if any, and waits until the client reports itself
+    /// closed. The next pass then replaces it with a new connection.
+    pub async fn close(&self) {
+        let held = self.connection.lock().await;
+        let Some(open) = held.as_ref() else {
+            return;
+        };
+        if open.client.drain().await.is_err() {
+            return;
+        }
+        let closed = async {
+            while !open.closed.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        if tokio::time::timeout(CLOSE_TIMEOUT, closed).await.is_err() {
+            tracing::warn!("the archive event broker connection did not report closed in time");
+        }
     }
 
     /// The unpublished events a pass would publish next, in publication order.
@@ -90,6 +146,11 @@ impl OutboxPublisher {
 
     /// Makes one bounded attempt to publish pending events.
     ///
+    /// A pass with nothing to publish returns `Ok(0)` before it touches the network. Otherwise
+    /// it publishes through the publisher's one connection, opened on first need with the
+    /// `endpoint` and the nkey seed read from `nkey_seed_path`, and opened again only when the
+    /// client reports it closed.
+    ///
     /// # Errors
     ///
     /// Returns [`OutboxError`] when the broker cannot connect, when a publish is not
@@ -100,16 +161,47 @@ impl OutboxPublisher {
         endpoint: &str,
         nkey_seed_path: &std::path::Path,
     ) -> Result<usize, OutboxError> {
+        let pending: bool = sqlx::query_scalar(HAS_PENDING_SQL)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(OutboxError::Database)?;
+        if !pending {
+            return Ok(0);
+        }
+        let jetstream = self.jetstream(endpoint, nkey_seed_path).await?;
+        self.publish_pending_with(&jetstream).await
+    }
+
+    /// The `JetStream` context of the held connection, which is created or replaced when absent
+    /// or closed.
+    async fn jetstream(
+        &self,
+        endpoint: &str,
+        nkey_seed_path: &std::path::Path,
+    ) -> Result<async_nats::jetstream::Context, OutboxError> {
+        let mut held = self.connection.lock().await;
+        if let Some(open) = held
+            .as_ref()
+            .filter(|open| !open.closed.load(Ordering::Acquire))
+        {
+            return Ok(open.jetstream.clone());
+        }
         let seed = tokio::fs::read_to_string(nkey_seed_path)
             .await
             .map_err(OutboxError::broker)?;
-        let options = connect_options(seed.trim().to_owned());
+        let closed = Arc::new(AtomicBool::new(false));
+        let options = connect_options(seed.trim().to_owned(), Arc::clone(&closed));
         let client = tokio::time::timeout(CONNECT_TIMEOUT, options.connect(endpoint))
             .await
             .map_err(|_| OutboxError::BrokerTimeout)?
             .map_err(OutboxError::broker)?;
-        self.publish_pending_with(&async_nats::jetstream::new(client))
-            .await
+        let jetstream = async_nats::jetstream::new(client.clone());
+        *held = Some(HeldConnection {
+            client,
+            jetstream: jetstream.clone(),
+            closed,
+        });
+        Ok(jetstream)
     }
 
     /// Makes one bounded attempt to publish pending events through an open `JetStream` context.
