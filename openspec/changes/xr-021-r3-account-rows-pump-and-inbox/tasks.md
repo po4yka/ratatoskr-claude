@@ -6,8 +6,8 @@ A dependency pin: no failing test can precede it, the existing suite staying gre
 
 ## 2. Inbox prefix (R3-01)
 
-- [ ] 2.1 RED: `crates/claude-archive/tests/inbox_prefix.rs::the_pump_completes_jetstream_requests_under_its_inbox_prefix` against a `nats-server` whose only user is the stanza of `deploy/nats/identity.conf`; it times out because the connection has no inbox prefix.
-- [ ] 2.2 GREEN: `INBOX_PREFIX`, `custom_inbox_prefix`, `deploy/nats/identity.conf`, the CI step that puts `nats-server` on `PATH`.
+- [x] 2.1 RED: `crates/claude-archive/tests/inbox_prefix.rs::the_pump_completes_jetstream_requests_under_its_inbox_prefix` against a `nats-server` whose only user is the stanza of `deploy/nats/identity.conf`; it times out because the connection has no inbox prefix.
+- [x] 2.2 GREEN: `INBOX_PREFIX`, `custom_inbox_prefix`, `deploy/nats/identity.conf`, the CI step that puts `nats-server` on `PATH`.
 
 ## 3. One broker connection (R3-07 rule 1)
 

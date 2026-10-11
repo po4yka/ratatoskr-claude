@@ -37,6 +37,7 @@ test-support = []
 ratatoskr-claude-archive = { path = ".", features = ["test-support"] }
 futures-util.workspace = true
 sha2.workspace = true
+nkeys = "0.4.5"
 
 [lints]
 workspace = true

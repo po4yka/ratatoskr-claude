@@ -13,6 +13,10 @@ use uuid::Uuid;
 
 /// The Platform-owned subject for the per-provider operation report ingress.
 const OPERATION_REPORTED_SUBJECT: &str = "evt.ai-archive.claude.operation.reported.v1";
+/// The inbox prefix of every connection this service opens. The deployed ACL lets the identity
+/// subscribe to `_INBOX_claude.>` and to nothing else (XR-021 CONTRACTS.md R3-01), so a reply on
+/// the shared `_INBOX.>` namespace would never reach it.
+const INBOX_PREFIX: &str = "_INBOX_claude";
 /// One pass never monopolises the broker or database queue.
 const BATCH_SIZE: i64 = 32;
 /// A background retry must not wait forever for an unavailable broker.
@@ -41,6 +45,12 @@ pub(crate) fn subject_for_event_type(event_type: &str) -> Option<&'static str> {
         "ai_archive.subject.tombstoned.v1" => "evt.ai_archive.subject.tombstoned.v1",
         _ => return None,
     })
+}
+
+/// The options of the one broker connection of this service: nkey authentication and the
+/// service's own inbox prefix.
+fn connect_options(seed: String) -> async_nats::ConnectOptions {
+    async_nats::ConnectOptions::with_nkey(seed).custom_inbox_prefix(INBOX_PREFIX)
 }
 
 /// The unpublished rows a pass would offer next, oldest first.
@@ -93,7 +103,7 @@ impl OutboxPublisher {
         let seed = tokio::fs::read_to_string(nkey_seed_path)
             .await
             .map_err(OutboxError::broker)?;
-        let options = async_nats::ConnectOptions::with_nkey(seed.trim().to_owned());
+        let options = connect_options(seed.trim().to_owned());
         let client = tokio::time::timeout(CONNECT_TIMEOUT, options.connect(endpoint))
             .await
             .map_err(|_| OutboxError::BrokerTimeout)?

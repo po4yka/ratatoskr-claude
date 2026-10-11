@@ -89,6 +89,15 @@ jobs:
           docker logs claude-ci-nats
           exit 1
 
+      # `inbox_prefix.rs` and the connection-count tests of `operation_outbox.rs` start their own
+      # `nats-server` (one whose only user is the reviewed Claude stanza), so the server binary must
+      # be on PATH. It is the one the container above already runs.
+      - name: Put nats-server on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          docker cp claude-ci-nats:/usr/local/bin/nats-server "$RUNNER_TEMP/bin/nats-server"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       - run: cargo fetch --locked
 
       - run: cargo fmt --all -- --check

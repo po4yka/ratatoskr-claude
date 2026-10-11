@@ -1670,6 +1670,7 @@ dependencies = [
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "nkeys",
  "ratatoskr-ai-archive-contracts",
  "ratatoskr-claude-archive",
  "ratatoskr-error-contracts",
