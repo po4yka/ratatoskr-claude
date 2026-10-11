@@ -1,25 +1,13 @@
 //! The one blob reference protocol for registration and erasure (XR-021 CONTRACTS.md R2-07).
 //!
-//! The blob store is content-addressed, so two actors can race on one digest: a deletion that asks
-//! whether anything still references a digest and then erases it, and an import that stores
-//! identical bytes (a no-op, because they exist) and registers a reference afterwards. Both follow
-//! one protocol over one lock per digest, `pg_advisory_xact_lock(hashtextextended('blob:' ||
-//! digest_hex, 0))` in this service's own database.
+//! The blob store is content-addressed, so two actors can race on one digest: a deletion that asks whether anything still references a digest and then erases it, and an import that stores identical bytes (a no-op, because they exist) and registers a reference afterwards. Both follow one protocol over one lock per digest, `pg_advisory_xact_lock(hashtextextended('blob:' || digest_hex, 0))` in this service's own database.
 //!
-//! - The eraser, per blob and in one transaction, takes the digest lock, recomputes the references
-//!   with [`referenced_among`], then either keeps the blob or erases it, and commits while still
-//!   holding the lock.
-//! - The registrar, in the transaction that inserts the first row referencing a digest, takes the
-//!   digest lock before that insert and checks the blob is present. A missing blob means an eraser
-//!   won: the registrar stores the bytes again when it still holds them and otherwise fails with
-//!   [`BlobRegistrationError::Erased`], a retryable class, and registers nothing.
+//! - The eraser, per blob and in one transaction, takes the digest lock, recomputes the references with [`referenced_among`], then either keeps the blob or erases it, and commits while still holding the lock.
+//! - The registrar, in the transaction that inserts the first row referencing a digest, takes the digest lock before that insert and checks the blob is present. A missing blob means an eraser won: the registrar stores the bytes again when it still holds them and otherwise fails with [`BlobRegistrationError::Erased`], a retryable class, and registers nothing.
 //!
 //! The invariant is that no committed row references a missing blob.
 //!
-//! Acquisition order, for every transaction in this crate: the tenant lock first (the archive
-//! account id for importers, the request's tenant reference for deletion), then digest locks in
-//! ascending digest order. No path takes a digest lock and then a tenant lock, so the order has no
-//! cycle.
+//! Acquisition order, for every transaction in this crate: the tenant lock first (the archive account id for importers, the request's tenant reference for deletion), then digest locks in ascending digest order. No path takes a digest lock and then a tenant lock, so the order has no cycle.
 
 use std::collections::BTreeSet;
 
@@ -37,8 +25,7 @@ pub enum BlobRegistrationError {
     /// The blob store failed.
     #[error("the blob store could not confirm the blob")]
     Store(#[from] StoreError),
-    /// An erasure removed the blob and the registrar holds no bytes to store it again. The
-    /// operation is safe to retry from the beginning.
+    /// An erasure removed the blob and the registrar holds no bytes to store it again. The operation is safe to retry from the beginning.
     #[error("the blob was erased and cannot be stored again")]
     Erased {
         /// Lowercase hexadecimal digest of the missing blob.
@@ -60,8 +47,7 @@ pub(crate) async fn blob_lock(
 
 /// The keys (`sha256/<hex>`) among `keys` that a surviving row still references.
 ///
-/// This is the one reference check: the row-removal phase of a deletion and the eraser both call
-/// it, so what planning retains and what erasure re-checks cannot disagree.
+/// This is the one reference check: the row-removal phase of a deletion and the eraser both call it, so what planning retains and what erasure re-checks cannot disagree.
 pub(crate) async fn referenced_among(
     tx: &mut Transaction<'_, Postgres>,
     keys: &[String],
@@ -84,15 +70,11 @@ pub(crate) async fn referenced_among(
 
 /// Registers the references a transaction is about to insert.
 ///
-/// Call it after the tenant lock and before the first insert that references any of
-/// `references`. It takes the digest locks in ascending order and checks every blob is present
-/// (by metadata, so a multi-gigabyte archive is not hashed again). `staged` is every byte
-/// sequence the caller still holds; a missing blob whose digest one of them has is stored again.
+/// Call it after the tenant lock and before the first insert that references any of `references`. It takes the digest locks in ascending order and checks every blob is present (by metadata, so a multi-gigabyte archive is not hashed again). `staged` is every byte sequence the caller still holds; a missing blob whose digest one of them has is stored again.
 ///
 /// # Errors
 ///
-/// Returns [`BlobRegistrationError`] when a lock or the store fails, or when a blob is missing and
-/// no staged bytes can restore it.
+/// Returns [`BlobRegistrationError`] when a lock or the store fails, or when a blob is missing and no staged bytes can restore it.
 pub async fn register(
     tx: &mut Transaction<'_, Postgres>,
     store: &BlobStore,

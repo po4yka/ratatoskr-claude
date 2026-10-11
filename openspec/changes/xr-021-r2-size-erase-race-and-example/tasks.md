@@ -12,8 +12,8 @@
 
 ## 3. Operator example and documentation (R2-10)
 
-- [ ] 3.1 RED: `services/claude-archive/tests/boot.rs` adds `the_shipped_example_loads`; it fails because `deploy/systemd/claude.conf.example` does not exist.
-- [ ] 3.2 GREEN: ship the example. `README.md` and `DEVELOPMENT.md` list the bus, accounts and size-guard variables (documentation, so no test fails first).
+- [x] 3.1 RED: `services/claude-archive/tests/boot.rs` adds `the_shipped_example_loads`; it fails because `deploy/systemd/claude.conf.example` does not exist.
+- [x] 3.2 GREEN: ship the example. `README.md` and `DEVELOPMENT.md` list the bus, accounts and size-guard variables (documentation, so no test fails first).
 
 ## 4. Gate
 

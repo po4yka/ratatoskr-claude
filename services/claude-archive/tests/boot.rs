@@ -237,3 +237,83 @@ fn check_config_refuses_invalid_environment_with_78() {
         "the refusal names the missing field"
     );
 }
+
+/// The `KEY=value` entries of a systemd `EnvironmentFile`: comments and blank lines skipped.
+fn environment_entries(file: &str) -> Vec<(String, String)> {
+    file.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (key, value) = line
+                .split_once('=')
+                .expect("every non-comment line of the example is KEY=value");
+            (key.to_owned(), value.to_owned())
+        })
+        .collect()
+}
+
+/// The shipped operator example is the configuration a deployment starts from, so it loads
+/// through the service's own loader and through the real `check-config`, with the receipt flow
+/// enabled: a renamed key or a flow that silently stops being enabled fails here (XR-021
+/// CONTRACTS.md R2-10). The loader reads no file, so the absolute paths need no substitute.
+#[test]
+fn the_shipped_example_loads() {
+    use secrecy::ExposeSecret as _;
+
+    let example = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/systemd/claude.conf.example"
+    ))
+    .expect("the operator example ships at deploy/systemd/claude.conf.example");
+    let entries = environment_entries(&example);
+
+    let config = ratatoskr_claude_archive::Config::from_environment(entries.clone())
+        .expect("the shipped example is a valid configuration");
+
+    assert_eq!(
+        config.admin.listen_address.to_string(),
+        "127.0.0.1:9086",
+        "the operator listener is host only on its allocated port"
+    );
+    assert_eq!(
+        config.receipt.listen_address.to_string(),
+        "127.0.0.1:8097",
+        "the receipt listener is the port Edge routes to"
+    );
+    assert!(
+        config.storage.blob_root.is_some() && config.storage.database_url.is_some(),
+        "the storage keys are set"
+    );
+    assert!(
+        !config.receipt.platform_accounts.is_empty(),
+        "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS maps a Platform user, or no fact is ever owned"
+    );
+    assert_eq!(
+        config
+            .receipt
+            .event_bus_url
+            .as_ref()
+            .map(|url| url.expose_secret().to_owned())
+            .as_deref(),
+        Some("nats://127.0.0.1:4222"),
+        "the event bus is enabled, or no operation report or fact is ever published"
+    );
+    assert_eq!(
+        config.receipt.event_bus_nkey_seed_path,
+        Some(std::path::PathBuf::from("/etc/ratatoskr/claude.nkey")),
+        "the seed is installed at the path every identity uses"
+    );
+
+    let output = Command::new(BIN)
+        .arg("check-config")
+        .env_clear()
+        .envs(entries)
+        .output()
+        .expect("the service binary runs");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the real binary accepts the shipped example: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

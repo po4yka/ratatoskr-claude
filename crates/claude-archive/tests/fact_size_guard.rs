@@ -1,6 +1,4 @@
-//! A fact larger than the event limit is not enqueued, and the import says so (XR-021
-//! CONTRACTS.md R2-04 rule 4): `ChatGPT` and Claude do not truncate or split conversations, so the
-//! user is told the truth instead of seeing a success whose conversation Knowledge never receives.
+//! A fact larger than the event limit is not enqueued, and the import says so (XR-021 CONTRACTS.md R2-04 rule 4): `ChatGPT` and Claude do not truncate or split conversations, so the user is told the truth instead of seeing a success whose conversation Knowledge never receives.
 //!
 //! Verified only against the documented synthetic export schema.
 
@@ -91,8 +89,7 @@ fn worker(db: &TestDatabase, store: &BlobStore, users: PlatformUsers) -> Initial
     )
 }
 
-/// `length` hexadecimal characters of a hash chain: archive inspection refuses a compression ratio
-/// a run of one letter would exceed.
+/// `length` hexadecimal characters of a hash chain: archive inspection refuses a compression ratio a run of one letter would exceed.
 fn incompressible(length: usize) -> String {
     let mut text = String::new();
     let mut block = Sha256::digest(b"fact-size-guard");
@@ -104,8 +101,7 @@ fn incompressible(length: usize) -> String {
     text
 }
 
-/// The synthetic export plus one conversation of three 30 000 character messages, which no
-/// 65 536 byte envelope can hold.
+/// The synthetic export plus one conversation of three 30 000 character messages, which no 65 536 byte envelope can hold.
 fn zip_with_a_huge_conversation() -> Vec<u8> {
     let mut export: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/synthetic_consumer_export.json"))
