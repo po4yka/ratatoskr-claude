@@ -16,8 +16,8 @@ A dependency pin: no failing test can precede it, the existing suite staying gre
 
 ## 4. The first mapped receipt creates the account, an unmapped user is a 403 (R3-04 rule 1, R3-03 rule 3)
 
-- [ ] 4.1 RED: `crates/claude-archive/tests/receipt.rs` adds `the_first_receipt_from_a_mapped_user_creates_the_account` and `a_tenant_token_receipt_still_requires_an_existing_account`; `services/claude-archive/tests/admin.rs` adds `an_unmapped_platform_user_is_forbidden_not_unauthenticated`, `malformed_claims_stay_unauthenticated`, `an_authorization_header_stays_unauthenticated` and `capabilities_still_carry_no_store`.
-- [ ] 4.2 GREEN: the account insert in the Platform receipt transaction and `Kind::AccountUnmapped`.
+- [x] 4.1 RED: `crates/claude-archive/tests/receipt.rs` adds `the_first_receipt_from_a_mapped_user_creates_the_account` and `a_tenant_token_receipt_still_requires_an_existing_account`; `services/claude-archive/tests/admin.rs` adds `an_unmapped_platform_user_is_forbidden_not_unauthenticated`, `malformed_claims_stay_unauthenticated`, `an_authorization_header_stays_unauthenticated` and `capabilities_still_carry_no_store`.
+- [x] 4.2 GREEN: the account insert in the Platform receipt transaction and `Kind::AccountUnmapped`.
 
 ## 5. A failed import is reported for a duplicate and logged (R3-04 rule 2, R3-07 rule 2)
 

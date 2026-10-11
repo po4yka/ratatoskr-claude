@@ -12,7 +12,7 @@ RATATOSKR__STORAGE__BLOB_ROOT=/mnt/nvme/ratatoskr/blobs/ratatoskr-claude
 
 # The receipt flow is DORMANT without the three keys below: with no account mapping the receipt knows no tenant, and with no event bus nothing is published. This example enables all of them.
 #
-# One Platform user per archive account, one to one: `<platform user uuid>=<archive account uuid>`, comma separated. The same mapping decides the Platform owner of every `ai_archive.*` fact and of every deletion tombstone, and an account without a mapping emits no fact. Replace both UUIDs with the real user and the `claude_archive.accounts.account_id` created for it.
+# One Platform user per archive account, one to one: `<platform user uuid>=<archive account uuid>`, comma separated. The same mapping decides the Platform owner of every `ai_archive.*` fact and of every deletion tombstone, and an account without a mapping emits no fact. Replace the first UUID with the real Platform user and the second with a new UUID for its archive account; the first receipt from that user creates the account row, so nothing is inserted by hand. A Platform user that is not listed is refused with 403.
 RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS=00000000-0000-7000-8000-0000000000a1=00000000-0000-7000-8000-0000000000b1
 # The broker identity is defined in Platform's `deploy/nats/ratatoskr.conf`; the seed is installed at the path every service uses for its own identity and is read at runtime, never logged.
 RATATOSKR__RECEIPT__EVENT_BUS_URL=nats://127.0.0.1:4222

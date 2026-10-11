@@ -200,7 +200,7 @@ pub async fn receive_archive(
             StoreError::EmptyInput => ReceiptError::EmptyDelivery,
             other => ReceiptError::Storage(other),
         })?;
-    record_stored_archive(database, store, scope, mode, blob_ref, None).await
+    record_stored_archive(database, store, scope, mode, blob_ref, None, Tenant::Known).await
 }
 
 /// Receives a Platform-bound archive only when declared identity matches.
@@ -236,7 +236,7 @@ pub async fn receive_platform_archive(
             StoreError::DeclaredIdentityMismatch => ReceiptError::DeclaredIdentityMismatch,
             other => ReceiptError::Storage(other),
         })?;
-    record_stored_archive(database, store, scope, mode, blob_ref, None).await
+    record_stored_archive(database, store, scope, mode, blob_ref, None, Tenant::Known).await
 }
 
 /// Receives one Platform archive and durably records non-terminal import work.
@@ -277,13 +277,26 @@ pub async fn receive_platform_operation_archive(
             StoreError::DeclaredIdentityMismatch => ReceiptError::DeclaredIdentityMismatch,
             other => ReceiptError::Storage(other),
         })?;
-    record_stored_archive(database, store, scope, mode, blob_ref, Some(operation)).await
+    record_stored_archive(
+        database,
+        store,
+        scope,
+        mode,
+        blob_ref,
+        Some(operation),
+        Tenant::Known,
+    )
+    .await
 }
 
 /// Records a previously verified Platform archive and its operation-bound import work.
 ///
 /// Callers must authenticate the scope before streaming and pass only a
-/// [`BlobRef`] produced by the identity-verifying `BlobStore` operation.
+/// [`BlobRef`] produced by the identity-verifying `BlobStore` operation. The Platform user to
+/// archive account mapping is that authentication, so an account scope whose row does not exist
+/// yet is created in the receipt transaction on first use, with the external identifier
+/// `platform-account:<account id>` (XR-021 CONTRACTS.md R3-04 rule 1). The tenant-token receipts
+/// above keep requiring an existing account or organization.
 ///
 /// # Errors
 ///
@@ -303,8 +316,18 @@ pub async fn record_verified_platform_archive(
         AcquisitionMode::ConsumerExport,
         blob_ref,
         Some(operation),
+        Tenant::PlatformMapped,
     )
     .await
+}
+
+/// Where the tenant of a recorded archive was verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tenant {
+    /// The scope was checked against an existing account or organization row.
+    Known,
+    /// The scope is a Platform-mapped account, which is created on first use.
+    PlatformMapped,
 }
 
 /// Records a verified raw archive and starts its import run.
@@ -315,6 +338,7 @@ async fn record_stored_archive(
     mode: AcquisitionMode,
     blob_ref: BlobRef,
     platform_operation: Option<PlatformOperation>,
+    tenant: Tenant,
 ) -> Result<ReceiptOutcome, ReceiptError> {
     let digest_bytes = decode_digest_hex(&blob_ref.digest_hex)
         .ok_or(ReceiptError::Storage(StoreError::InvalidIdentity))?;
@@ -327,6 +351,17 @@ async fn record_stored_archive(
     let ai_archive_id = Uuid::now_v7();
     let run_id = Uuid::now_v7();
     let mut transaction = database.pool().begin().await.map_err(ReceiptError::Query)?;
+    if let (Tenant::PlatformMapped, TenantScope::Account(account)) = (tenant, scope) {
+        sqlx::query(
+            "insert into claude_archive.accounts (account_id, external_account_id)
+             values ($1, 'platform-account:' || $1)
+             on conflict (account_id) do nothing",
+        )
+        .bind(account)
+        .execute(&mut *transaction)
+        .await
+        .map_err(ReceiptError::Query)?;
+    }
     // The archive stream is gone once it is stored, so a blob an eraser removed in the meantime
     // cannot be stored again here: the registration fails and the delivery is retried.
     crate::blob_protocol::register(&mut transaction, store, &[&blob_ref], &[]).await?;

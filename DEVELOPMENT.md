@@ -101,14 +101,20 @@ test per router proves it, and configuration refuses the same address for both.
 
 `POST /v1/ai-archives/receipt` takes the Edge-minted claims named by
 `ratatoskr_ai_archive_contracts::platform_receipt` and answers `202 Accepted` with an empty body. Every other
-answer is `application/json` carrying an `ErrorEnvelope` (`claude.auth.unauthenticated` 401,
-`claude.request.invalid` 400, `claude.request.too_large` 413, `claude.request.method_not_allowed` 405,
+answer is `application/json` carrying an `ErrorEnvelope` (`claude.auth.unauthenticated` 401 for missing or
+malformed claims or an `Authorization` header, `claude.account.unmapped` 403 for a Platform user that is not in the
+mapping, `claude.request.invalid` 400, `claude.request.too_large` 413, `claude.request.method_not_allowed` 405,
 `claude.server.internal` 500), because Edge replaces any other body with `edge.upstream_invalid_response`.
 `GET /v1/capabilities` answers the unauthenticated capability document `{"service":"claude","capabilities":
 ["ai_archive.receipt"]}` on the receipt listener, where the receipt route is mounted.
 `RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS` maps each Platform user to its archive account, one to one (a user or an account that appears twice is refused at startup); the same mapping
 decides the Platform owner of every `ai_archive.*` fact and every deletion tombstone, and an account without a
-mapping emits no fact.
+mapping emits no fact. The mapping is also the receipt's authentication: the first receipt from a mapped user creates the
+archive account row in its own transaction (`platform-account:<account uuid>` as the external id), so nothing is inserted
+by hand, and a Platform user outside the mapping is refused with 403, which Edge relays as a refusal of that user and not
+of the device. A tenant-token receipt (the library entry points) still requires an existing account or organization.
+Every refused receipt is logged at WARN with a closed `class` (`unauthenticated`, `unmapped_account`, `invalid_request`,
+`payload_too_large`, `method_not_allowed`) and the operation id, never an archive path, name or content.
 
 ## Event bus, accounts and size limits
 

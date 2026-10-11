@@ -263,24 +263,38 @@ struct ReceiptFixture {
     database: TestDatabase,
     root: std::path::PathBuf,
     router: axum::Router,
+    /// The archive account the Platform user is mapped to; its row exists only when seeded.
+    account: uuid::Uuid,
 }
 
 impl ReceiptFixture {
+    /// A fixture whose mapped archive account already has its row.
     async fn open(label: &str) -> Self {
+        Self::open_with(label, true).await
+    }
+
+    /// A fixture whose mapped archive account has no row yet, like a fresh deployment.
+    async fn open_unseeded(label: &str) -> Self {
+        Self::open_with(label, false).await
+    }
+
+    async fn open_with(label: &str, seed_account: bool) -> Self {
         let database = TestDatabase::create()
             .await
             .expect("a disposable database applies the definition");
         let platform_user =
             uuid::Uuid::parse_str(PLATFORM_USER).expect("the fixture Platform user is a UUID");
         let archive_account = uuid::Uuid::now_v7();
-        sqlx::query(
-            "insert into claude_archive.accounts (account_id, external_account_id) values ($1, $2)",
-        )
-        .bind(archive_account)
-        .bind(format!("account-{archive_account}"))
-        .execute(database.database.pool())
-        .await
-        .expect("the mapped archive account inserts");
+        if seed_account {
+            sqlx::query(
+                "insert into claude_archive.accounts (account_id, external_account_id) values ($1, $2)",
+            )
+            .bind(archive_account)
+            .bind(format!("account-{archive_account}"))
+            .execute(database.database.pool())
+            .await
+            .expect("the mapped archive account inserts");
+        }
         let root = temp_root(label);
         let store = BlobStore::open(&root).expect("the temporary blob store opens");
         let router = ratatoskr_claude_archive_service::receipt_router(PlatformReceiptState::new(
@@ -293,6 +307,7 @@ impl ReceiptFixture {
             database,
             root,
             router,
+            account: archive_account,
         }
     }
 
@@ -362,20 +377,6 @@ fn refusals() -> Vec<Refusal> {
             method: "POST",
             body: b"x".to_vec(),
             edit: |headers| headers.push(("authorization".to_owned(), "Bearer x".to_owned())),
-            status: StatusCode::UNAUTHORIZED,
-            code: "claude.auth.unauthenticated",
-        },
-        Refusal {
-            label: "an unknown tenant",
-            method: "POST",
-            body: b"x".to_vec(),
-            edit: |headers| {
-                headers.retain(|(name, _)| name != HEADER_USER_ID);
-                headers.push((
-                    HEADER_USER_ID.to_owned(),
-                    "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb99".to_owned(),
-                ));
-            },
             status: StatusCode::UNAUTHORIZED,
             code: "claude.auth.unauthenticated",
         },
@@ -538,5 +539,165 @@ async fn the_receipt_router_serves_no_operator_surface() {
             .iter()
             .all(|(_, status)| *status == StatusCode::NOT_FOUND),
         "the receipt port exposes no operator route: {statuses:?}"
+    );
+}
+
+/// Posts the receipt for `body` with the claims `edit` leaves, and returns the status, the
+/// content type and the parsed `ErrorEnvelope` when there is one.
+async fn post_edited(
+    fixture: &ReceiptFixture,
+    body: &[u8],
+    edit: impl FnOnce(&mut Vec<(String, String)>),
+) -> (StatusCode, Option<String>, Option<ErrorEnvelope>) {
+    let mut headers = receipt_headers(body);
+    edit(&mut headers);
+    let mut request = Request::builder().method("POST").uri(RECEIPT_PATH);
+    for (name, value) in &headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = fixture
+        .router
+        .clone()
+        .oneshot(
+            request
+                .body(Body::from(body.to_vec()))
+                .expect("the receipt request is well-formed"),
+        )
+        .await
+        .expect("the in-memory service answers");
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .map(|value| value.to_str().expect("header is ASCII").to_owned());
+    let bytes = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .expect("the body collects")
+        .to_bytes();
+    (status, content_type, serde_json::from_slice(&bytes).ok())
+}
+
+fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+    headers.retain(|(existing, _)| existing != name);
+    headers.push((name.to_owned(), value.to_owned()));
+}
+
+#[tokio::test]
+async fn an_unmapped_platform_user_is_forbidden_not_unauthenticated() {
+    let fixture = ReceiptFixture::open("receipt-unmapped").await;
+
+    let (status, content_type, envelope) = post_edited(&fixture, b"x", |headers| {
+        set_header(
+            headers,
+            HEADER_USER_ID,
+            "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb99",
+        );
+    })
+    .await;
+    fixture.close().await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an unmapped user is not a device credential failure"
+    );
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+    let envelope = envelope.expect("the refusal is an ErrorEnvelope");
+    assert_eq!(envelope.code.as_str(), "claude.account.unmapped");
+    assert!(!envelope.retryable, "a missing mapping is not retryable");
+    assert_eq!(
+        envelope.message.as_str(),
+        "This user is not set up for archive import."
+    );
+}
+
+#[tokio::test]
+async fn malformed_claims_stay_unauthenticated() {
+    let fixture = ReceiptFixture::open("receipt-malformed").await;
+
+    let (status, _, envelope) = post_edited(&fixture, b"x", |headers| {
+        set_header(headers, HEADER_USER_ID, "not-a-uuid");
+    })
+    .await;
+    fixture.close().await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        envelope
+            .expect("the refusal is an ErrorEnvelope")
+            .code
+            .as_str(),
+        "claude.auth.unauthenticated"
+    );
+}
+
+#[tokio::test]
+async fn an_authorization_header_stays_unauthenticated() {
+    let fixture = ReceiptFixture::open("receipt-authorization").await;
+
+    let (mapped, _, mapped_envelope) = post_edited(&fixture, b"x", |headers| {
+        set_header(headers, "authorization", "Bearer x");
+    })
+    .await;
+    let (unmapped, _, unmapped_envelope) = post_edited(&fixture, b"x", |headers| {
+        set_header(headers, "authorization", "Bearer x");
+        set_header(
+            headers,
+            HEADER_USER_ID,
+            "018f5b4a-7c6f-7ab1-95d6-86ebc16bbb99",
+        );
+    })
+    .await;
+    fixture.close().await;
+
+    for (status, envelope) in [(mapped, mapped_envelope), (unmapped, unmapped_envelope)] {
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            envelope
+                .expect("the refusal is an ErrorEnvelope")
+                .code
+                .as_str(),
+            "claude.auth.unauthenticated"
+        );
+    }
+}
+
+#[tokio::test]
+async fn capabilities_still_carry_no_store() {
+    let fixture = ReceiptFixture::open_unseeded("receipt-capabilities-no-store").await;
+
+    let (status, _, cache_control) = get(fixture.router.clone(), CAPABILITIES_PATH).await;
+    fixture.close().await;
+
+    assert_eq!(
+        (status, cache_control.as_deref()),
+        (StatusCode::OK, Some("no-store"))
+    );
+}
+
+#[tokio::test]
+async fn a_mapped_user_with_no_account_row_is_accepted_and_the_row_is_created() {
+    let fixture = ReceiptFixture::open_unseeded("receipt-first-mapped").await;
+
+    let (status, _, _) = post_edited(&fixture, b"x", |_| {}).await;
+    let external: Option<String> = sqlx::query_scalar(
+        "select external_account_id from claude_archive.accounts where account_id = $1",
+    )
+    .bind(fixture.account)
+    .fetch_optional(fixture.database.database.pool())
+    .await
+    .expect("the account is readable");
+    let account = fixture.account;
+    fixture.close().await;
+
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "the first receipt of a mapped user needs no operator-seeded row"
+    );
+    assert_eq!(
+        external,
+        Some(format!("platform-account:{account}")),
+        "the receipt created the account row"
     );
 }

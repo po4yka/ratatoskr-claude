@@ -28,7 +28,7 @@ use ratatoskr_ai_archive_contracts::platform_receipt::{
     receipt_capability_document,
 };
 use ratatoskr_claude_archive::{
-    ArchiveIdentity, BlobStore, Database, MediaType, PlatformOperation, StoreError, TenantClaim,
+    ArchiveIdentity, BlobStore, Database, MediaType, PlatformOperation, StoreError, TenantScope,
 };
 
 use crate::fault::{Kind, reject};
@@ -341,7 +341,7 @@ async fn receipt_capabilities() -> Json<serde_json::Value> {
 }
 
 async fn method_not_allowed() -> Response {
-    reject(Kind::MethodNotAllowed)
+    reject(Kind::MethodNotAllowed, None)
 }
 
 /// *This process's async runtime is scheduling tasks and the server answers.*
@@ -404,7 +404,13 @@ async fn platform_receipt(
 ) -> Response {
     match receive(&state, &headers, body).await {
         Ok(()) => StatusCode::ACCEPTED.into_response(),
-        Err(kind) => reject(kind),
+        Err(kind) => reject(
+            kind,
+            headers
+                .get(HEADER_OPERATION_ID)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<Uuid>().ok()),
+        ),
     }
 }
 
@@ -416,8 +422,7 @@ async fn receive(
     if headers.contains_key(header::AUTHORIZATION) {
         return Err(Kind::Unauthenticated);
     }
-    let (claim, identity, operation) =
-        platform_claims(state, headers).ok_or(Kind::Unauthenticated)?;
+    let (account, identity, operation) = platform_claims(state, headers)?;
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -426,12 +431,10 @@ async fn receive(
         return Err(Kind::Invalid);
     }
 
-    let scope = ratatoskr_claude_archive::receipt::authenticate_claim(&state.database, &claim)
-        .await
-        .map_err(|error| match error {
-            ratatoskr_claude_archive::ReceiptError::UnknownTenant => Kind::Unauthenticated,
-            _ => Kind::Internal,
-        })?;
+    // The configured mapping is this path's authentication: the archive account row is created
+    // by the receipt transaction on first use (XR-021 CONTRACTS.md R3-04 rule 1), so no row has to
+    // exist before the stream is read.
+    let scope = TenantScope::Account(account);
     let media_type = MediaType::parse(ARCHIVE_MEDIA_TYPE).map_err(|_| Kind::Internal)?;
     let (reader, mut writer) = tokio::io::duplex(RECEIPT_PIPE_BYTES);
     let blob_store = state.blob_store.clone();
@@ -478,39 +481,47 @@ async fn receive(
     }
 }
 
+/// The mapped archive account, the declared archive identity and the operation of one receipt.
+///
+/// A missing or malformed claim is `Unauthenticated`; a well-formed claim set for a Platform user
+/// that is not in the configured mapping is `AccountUnmapped`, which is the user's to fix and never
+/// a failure of the device credential.
 fn platform_claims(
     state: &PlatformReceiptState,
     headers: &HeaderMap,
-) -> Option<(TenantClaim, ArchiveIdentity, PlatformOperation)> {
+) -> Result<(Uuid, ArchiveIdentity, PlatformOperation), Kind> {
     let header = |name: &'static str| headers.get(name)?.to_str().ok();
-    let user_id = header(HEADER_USER_ID)?.parse::<Uuid>().ok()?;
-    let _device_id = header(HEADER_DEVICE_ID)?.parse::<Uuid>().ok()?;
-    let correlation = header(HEADER_CORRELATION_ID)?;
-    let operation_id = header(HEADER_OPERATION_ID)?.parse::<Uuid>().ok()?;
-    let sha256 = header(HEADER_ARCHIVE_SHA256)?;
-    let byte_size = header(HEADER_ARCHIVE_BYTE_SIZE)?.parse::<u64>().ok()?;
-    if correlation.is_empty()
-        || correlation.len() > 200
-        || byte_size == 0
-        || sha256.len() != 64
-        || !sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return None;
-    }
-    let account = *state.platform_accounts.get(&user_id)?;
-    Some((
-        TenantClaim {
-            account: Some(account),
-            organization: None,
-        },
-        ArchiveIdentity {
-            sha256: sha256.to_owned(),
-            byte_size,
-        },
-        PlatformOperation { operation_id },
-    ))
+    let well_formed = || {
+        let user_id = header(HEADER_USER_ID)?.parse::<Uuid>().ok()?;
+        let _device_id = header(HEADER_DEVICE_ID)?.parse::<Uuid>().ok()?;
+        let correlation = header(HEADER_CORRELATION_ID)?;
+        let operation_id = header(HEADER_OPERATION_ID)?.parse::<Uuid>().ok()?;
+        let sha256 = header(HEADER_ARCHIVE_SHA256)?;
+        let byte_size = header(HEADER_ARCHIVE_BYTE_SIZE)?.parse::<u64>().ok()?;
+        let valid = !correlation.is_empty()
+            && correlation.len() <= 200
+            && byte_size != 0
+            && sha256.len() == 64
+            && sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        valid.then(|| {
+            (
+                user_id,
+                ArchiveIdentity {
+                    sha256: sha256.to_owned(),
+                    byte_size,
+                },
+                PlatformOperation { operation_id },
+            )
+        })
+    };
+    let (user_id, identity, operation) = well_formed().ok_or(Kind::Unauthenticated)?;
+    let account = *state
+        .platform_accounts
+        .get(&user_id)
+        .ok_or(Kind::AccountUnmapped)?;
+    Ok((account, identity, operation))
 }
 
 /// `Cache-Control: no-store` on every admin response, including bare 404s.

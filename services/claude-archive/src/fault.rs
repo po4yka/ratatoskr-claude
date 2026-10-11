@@ -11,12 +11,15 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use ratatoskr_error_contracts::{ErrorCode, ErrorEnvelope};
 use ratatoskr_identifiers::SafeMessage;
+use uuid::Uuid;
 
 /// The closed set of ways the receipt route refuses a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     /// Claims are absent or unknown, or an `Authorization` header is present.
     Unauthenticated,
+    /// The Platform user is authenticated but is not mapped to an archive account.
+    AccountUnmapped,
     /// The content type is wrong or the declared archive identity differs from the bytes.
     Invalid,
     /// The body exceeds the configured archive limit.
@@ -28,8 +31,9 @@ pub(crate) enum Kind {
 }
 
 impl Kind {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Unauthenticated,
+        Self::AccountUnmapped,
         Self::Invalid,
         Self::TooLarge,
         Self::MethodNotAllowed,
@@ -39,6 +43,7 @@ impl Kind {
     const fn status(self) -> StatusCode {
         match self {
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
+            Self::AccountUnmapped => StatusCode::FORBIDDEN,
             Self::Invalid => StatusCode::BAD_REQUEST,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
@@ -49,6 +54,7 @@ impl Kind {
     const fn code(self) -> &'static str {
         match self {
             Self::Unauthenticated => "claude.auth.unauthenticated",
+            Self::AccountUnmapped => "claude.account.unmapped",
             Self::Invalid => "claude.request.invalid",
             Self::TooLarge => "claude.request.too_large",
             Self::MethodNotAllowed => "claude.request.method_not_allowed",
@@ -59,6 +65,7 @@ impl Kind {
     const fn message(self) -> &'static str {
         match self {
             Self::Unauthenticated => "The request is not authenticated.",
+            Self::AccountUnmapped => "This user is not set up for archive import.",
             Self::Invalid => "The request is invalid.",
             Self::TooLarge => "The archive exceeds the accepted size.",
             Self::MethodNotAllowed => "The method is not allowed for this route.",
@@ -70,8 +77,9 @@ impl Kind {
     pub(crate) const fn class(self) -> &'static str {
         match self {
             Self::Unauthenticated => "unauthenticated",
-            Self::Invalid => "invalid",
-            Self::TooLarge => "too_large",
+            Self::AccountUnmapped => "unmapped_account",
+            Self::Invalid => "invalid_request",
+            Self::TooLarge => "payload_too_large",
             Self::MethodNotAllowed => "method_not_allowed",
             Self::Internal => "internal",
         }
@@ -105,9 +113,15 @@ fn table() -> Option<&'static [Fault]> {
     TABLE.get_or_init(build).as_deref()
 }
 
-/// Logs the failure class once and renders the refusal as a JSON `ErrorEnvelope`.
-pub(crate) fn reject(kind: Kind) -> Response {
-    tracing::warn!(class = kind.class(), "the Platform receipt was refused");
+/// Logs the failure class and the operation id once and renders the refusal as a JSON
+/// `ErrorEnvelope`. The operation id is Platform's own identifier from the minted claims, when the
+/// request carried a well-formed one; nothing about the archive is logged.
+pub(crate) fn reject(kind: Kind, operation_id: Option<Uuid>) -> Response {
+    tracing::warn!(
+        class = kind.class(),
+        operation_id = operation_id.map(|id| id.to_string()),
+        "the Platform receipt was refused"
+    );
     let mut response = match table().and_then(|faults| faults.iter().find(|f| f.kind == kind)) {
         Some(fault) => (kind.status(), fault.body.clone()).into_response(),
         // Unreachable while the static spellings satisfy their grammars, which a test guards.
