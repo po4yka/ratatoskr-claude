@@ -2,7 +2,7 @@
 
 A dependency pin: no failing test can precede it, the existing suite staying green is the gate.
 
-- [ ] 1.1 Move all `ratatoskr-*` git dependencies to `ad16855c4e7f3d52cd118274faa3b8f3ab4da576`, refresh `Cargo.lock`, run `cargo test --workspace --locked`.
+- [x] 1.1 Move all `ratatoskr-*` git dependencies to `ad16855c4e7f3d52cd118274faa3b8f3ab4da576`, refresh `Cargo.lock`, run `cargo test --workspace --locked`.
 
 ## 2. Inbox prefix (R3-01)
 
