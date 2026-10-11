@@ -118,7 +118,7 @@ impl InitialImportWorker {
              from claude_archive.import_runs r join claude_archive.exports e on e.export_id=r.export_id
              where r.state in ('received','stored','inspecting','schema_detected','extracting',
                                'staging','validating','reconciling','publishing')
-                or (r.state in ('completed','partial') and exists (
+                or (r.state in ('completed','partial','failed') and exists (
                     select 1 from claude_archive.platform_operation_imports p
                     where p.import_run_id=r.run_id and p.reported_at is null))
              order by r.started_at,r.run_id limit 1",
@@ -139,6 +139,12 @@ impl InitialImportWorker {
         else {
             return Ok(0);
         };
+        if state == "failed" {
+            // A later upload of the same bytes bound its operation to this failed run: it ends
+            // `failed` now, with the report the first failure sent (CONTRACTS.md R3-04 rule 2).
+            report_failed_operations(&self.pool, run_id).await?;
+            return Ok(1);
+        }
         if matches!(state.as_str(), "completed" | "partial") {
             let summary = load_summary(&self.pool, run_id).await?;
             enqueue_reports(&self.pool, run_id, export_id, archive_id, summary).await?;
@@ -159,7 +165,7 @@ impl InitialImportWorker {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) if is_permanent_import_error(&error) => {
-                mark_permanent_failure(&self.pool, run_id).await?;
+                mark_permanent_failure(&self.pool, run_id, failure_class(&error)).await?;
                 return Ok(1);
             }
             Err(error) => return Err(error),
@@ -388,7 +394,24 @@ const fn is_permanent_import_error(error: &ReparseError) -> bool {
     )
 }
 
-async fn mark_permanent_failure(pool: &PgPool, run_id: Uuid) -> Result<(), ReparseError> {
+/// The closed class a permanently failed import is logged under; never a path, name or content.
+const fn failure_class(error: &ReparseError) -> &'static str {
+    match error {
+        ReparseError::Intake(_) => "archive_invalid",
+        ReparseError::Parser(_) => "parse_failed",
+        ReparseError::Conflict => "reparse_conflict",
+        ReparseError::Encode(_) => "encode_failed",
+        ReparseError::Artifact(_) => "artifact_conflict",
+        ReparseError::Blob(_) => "blob_invalid",
+        _ => "import_failed",
+    }
+}
+
+async fn mark_permanent_failure(
+    pool: &PgPool,
+    run_id: Uuid,
+    class: &'static str,
+) -> Result<(), ReparseError> {
     let mut tx = pool.begin().await?;
     sqlx::query(
         "update claude_archive.import_runs
@@ -398,12 +421,32 @@ async fn mark_permanent_failure(pool: &PgPool, run_id: Uuid) -> Result<(), Repar
     .bind(run_id)
     .execute(&mut *tx)
     .await?;
+    report_failed_operations_in(&mut tx, run_id).await?;
+    tx.commit().await?;
+    tracing::warn!(class, run_id = %run_id, "an archive import failed permanently");
+    Ok(())
+}
+
+/// Reports the operations bound to a run that failed earlier and were not reported yet.
+async fn report_failed_operations(pool: &PgPool, run_id: Uuid) -> Result<(), ReparseError> {
+    let mut tx = pool.begin().await?;
+    report_failed_operations_in(&mut tx, run_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Enqueues the `failed` operation report of every operation bound to a failed run that has not
+/// been reported yet, and marks each operation reported.
+async fn report_failed_operations_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    run_id: Uuid,
+) -> Result<(), ReparseError> {
     let operations: Vec<Uuid> = sqlx::query_scalar(
         "select operation_id from claude_archive.platform_operation_imports
          where import_run_id=$1 and reported_at is null order by operation_id",
     )
     .bind(run_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     for operation_id in operations {
         let report: OperationReported = serde_json::from_value(serde_json::json!({
@@ -422,11 +465,10 @@ async fn mark_permanent_failure(pool: &PgPool, run_id: Uuid) -> Result<(), Repar
             .bind(envelope.event_id.0).bind(envelope.event_type.to_wire()).bind(operation_id.to_string())
             .bind(serde_json::to_value(&envelope)?).bind(Sha256::digest(payload).as_slice())
             .bind(envelope.correlation_id.to_string()).bind(envelope.occurred_at.to_string())
-            .execute(&mut *tx).await?;
+            .execute(&mut **tx).await?;
         sqlx::query("update claude_archive.platform_operation_imports set reported_at=now() where operation_id=$1 and reported_at is null")
-            .bind(operation_id).execute(&mut *tx).await?;
+            .bind(operation_id).execute(&mut **tx).await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 

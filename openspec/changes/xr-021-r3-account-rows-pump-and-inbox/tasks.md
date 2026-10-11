@@ -21,8 +21,8 @@ A dependency pin: no failing test can precede it, the existing suite staying gre
 
 ## 5. A failed import is reported for a duplicate and logged (R3-04 rule 2, R3-07 rule 2)
 
-- [ ] 5.1 RED: `crates/claude-archive/tests/import_state.rs` adds `a_second_upload_of_bytes_that_failed_permanently_is_reported_failed` and `a_permanent_import_failure_is_logged_with_a_class`.
-- [ ] 5.2 GREEN: the selector takes `failed` runs with an unreported bound operation; `mark_permanent_failure` logs.
+- [x] 5.1 RED: `crates/claude-archive/tests/import_state.rs` adds `a_second_upload_of_bytes_that_failed_permanently_is_reported_failed` and `a_permanent_import_failure_is_logged_with_a_class`.
+- [x] 5.2 GREEN: the selector takes `failed` runs with an unreported bound operation; `mark_permanent_failure` logs.
 
 ## 6. Provisioning and documentation (R3-11, R3-19)
 
