@@ -435,3 +435,69 @@ fn the_event_size_guard_accepts_only_its_documented_range() {
         );
     }
 }
+
+/// The value of `key` in the shipped operator example, when the example ships and sets it.
+fn example_value(key: &str) -> Option<String> {
+    let example = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/systemd/claude.conf.example"
+    ))
+    .ok()?;
+    example
+        .lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+        .map(str::to_owned)
+}
+
+/// XR-021 CONTRACTS.md R3-11: a deployment that follows the docs can start the service, so the
+/// role and database the example names are the ones the checked-in provisioning file creates, on
+/// the port the target runs `PostgreSQL` on.
+#[test]
+fn the_example_role_file_exists() {
+    let url = example_value("RATATOSKR__STORAGE__DATABASE_URL")
+        .expect("the operator example sets the database URL");
+    let rest = url
+        .strip_prefix("postgres://")
+        .expect("the example names a postgres:// URL");
+    let (credentials, location) = rest
+        .split_once('@')
+        .expect("the example URL names credentials and a host");
+    let role = credentials
+        .split_once(':')
+        .map_or(credentials, |(role, _placeholder)| role);
+    let (host_and_port, database) = location
+        .split_once('/')
+        .expect("the example URL names a database");
+    let port = host_and_port
+        .rsplit_once(':')
+        .map(|(_host, port)| port)
+        .expect("the example URL names a port");
+
+    let provisioning = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/postgres/role.sql"
+    ))
+    .expect("deploy/postgres/role.sql provisions the role the example names");
+
+    assert_eq!(
+        (role, database, port),
+        ("ratatoskr_claude", "ratatoskr", "5432"),
+        "the example connects as the service role to the one database on the target's port"
+    );
+    for statement in [
+        format!("create role {role} login;"),
+        format!("alter role {role} nosuperuser nocreatedb nocreaterole noreplication nobypassrls;"),
+        format!("grant connect, create on database {database} to {role};"),
+        format!("\\connect {database}"),
+        format!("revoke all on schema public from {role};"),
+    ] {
+        assert!(
+            provisioning.contains(&statement),
+            "role.sql lacks `{statement}`"
+        );
+    }
+    assert!(
+        !provisioning.to_ascii_lowercase().contains("password '"),
+        "no credential is checked in; the password is set with \\password"
+    );
+}

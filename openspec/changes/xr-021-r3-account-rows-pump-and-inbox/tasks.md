@@ -26,8 +26,8 @@ A dependency pin: no failing test can precede it, the existing suite staying gre
 
 ## 6. Provisioning and documentation (R3-11, R3-19)
 
-- [ ] 6.1 RED: `crates/claude-archive/tests/config.rs::the_example_role_file_exists` fails because `deploy/postgres/role.sql` does not exist.
-- [ ] 6.2 GREEN: `deploy/postgres/role.sql`, the README deployment paragraph, the corrected stale paragraphs (documentation, so no test fails first).
+- [x] 6.1 RED: `crates/claude-archive/tests/config.rs::the_example_role_file_exists` fails because `deploy/postgres/role.sql` does not exist.
+- [x] 6.2 GREEN: `deploy/postgres/role.sql`, the README deployment paragraph, the corrected stale paragraphs (documentation, so no test fails first).
 
 ## 7. Gate
 
