@@ -127,6 +127,10 @@ pub enum ReparseError {
     /// An archive fact could not be built or enqueued.
     #[error("reparse archive fact could not be recorded")]
     Event(#[from] crate::ArchiveEventError),
+    /// A blob the rows are about to reference could not be registered. Retryable: an erasure may
+    /// have removed it, and the next pass stores it again.
+    #[error("reparse blob registration failed")]
+    Registration(#[from] crate::BlobRegistrationError),
 }
 
 /// Plans and applies exact parser replay.
@@ -286,6 +290,13 @@ impl ReparseEngine {
             tx.rollback().await?;
             return Ok(report);
         }
+        crate::blob_protocol::register(
+            &mut tx,
+            &self.blobs,
+            &[&evidence_ref],
+            &[plan.evidence.as_slice()],
+        )
+        .await?;
         sqlx::query("insert into claude_archive.extracted_artifacts (extracted_artifact_id,export_id,artifact_index,artifact_kind,blob_ref,content_hash,byte_size) values ($1,$2,0,'entry',$3,$4,$5) on conflict (export_id,artifact_index) do nothing")
             .bind(Uuid::now_v7()).bind(plan.export_id).bind(format!("sha256/{}",evidence_ref.digest_hex))
             .bind(decode_hex(&evidence_ref.digest_hex).ok_or(ReparseError::Conflict)?)

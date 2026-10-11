@@ -1,7 +1,7 @@
 ## 1. One blob reference protocol (XR-021 CONTRACTS.md R2-07)
 
-- [ ] 1.1 RED: `crates/claude-archive/tests/privacy_deletion_survivors.rs` adds `an_import_landing_between_row_removal_and_erase_keeps_its_blob`, `a_registrar_blocked_by_the_eraser_re_stores_the_blob` and `a_registrar_that_cannot_re_store_fails_retryably_and_registers_nothing`. Signature-only stubs (`PrivacyDeletionExecutor::with_erase_gate`, `blob_protocol::register`, `ReceiptError::BlobErased`) make them compile; they fail on assertions: the first because the eraser erases a blob a committed row references, the others because registration neither waits nor checks presence.
-- [ ] 1.2 GREEN: `blob_protocol.rs` (`blob_lock`, `referenced_among`, `register`), `erase_bytes` per-item transaction, and the registrars in `receipt.rs`, `initial_import.rs`, `reparse.rs` and `import_artifacts.rs`.
+- [x] 1.1 RED: `crates/claude-archive/tests/privacy_deletion_survivors.rs` adds `an_import_landing_between_row_removal_and_erase_keeps_its_blob`, `a_registrar_blocked_by_the_eraser_re_stores_the_blob`, `a_registrar_that_cannot_re_store_fails_retryably_and_registers_nothing` and `an_import_blocked_by_the_eraser_stores_its_parser_evidence_again` (the real importer; with its `register_blobs` call commented out it fails because the import does not wait for the digest lock). Signature-only stubs (`PrivacyDeletionExecutor::with_erase_gate`, `blob_protocol::register`, `ReceiptError::Registration`) make them compile; they fail on assertions: the first because the eraser erases a blob a committed row references, the others because registration neither waits nor checks presence.
+- [x] 1.2 GREEN: `blob_protocol.rs` (`blob_lock`, `referenced_among`, `register`), `erase_bytes` per-item transaction, and the registrars in `receipt.rs`, `initial_import.rs`, `reparse.rs` and `import_artifacts.rs`.
 
 ## 2. Size guard, undeliverable rows and honest reports (R2-04 rules 2 and 4)
 

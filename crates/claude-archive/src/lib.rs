@@ -11,6 +11,7 @@
 
 pub mod archive_inspection;
 pub mod artifact;
+pub mod blob_protocol;
 pub mod blob_store;
 pub mod completeness;
 pub mod config;
@@ -45,6 +46,7 @@ pub use artifact::{
     ArtifactReconciler, ArtifactReconciliationError, ArtifactVersionAnomaly,
     ArtifactVersionAvailability, ReconciledArtifact, ReconciledArtifactVersion,
 };
+pub use blob_protocol::BlobRegistrationError;
 pub use blob_store::{BlobRef, BlobStore, DigestAlgorithm, MediaType, StoreError};
 pub use completeness::{
     ArchiveCompletenessReport, CompletenessCounts, CompletenessStatus, CompletenessWarning,

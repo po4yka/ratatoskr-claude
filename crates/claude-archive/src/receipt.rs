@@ -92,6 +92,9 @@ pub enum ReceiptError {
     /// Platform's declared raw archive identity differs from the stream.
     #[error("the delivered archive differs from Platform's declared identity")]
     DeclaredIdentityMismatch,
+    /// Registering the stored archive's blob failed, or an erasure removed it first.
+    #[error("the archive blob could not be registered")]
+    Registration(#[from] crate::BlobRegistrationError),
     /// A typed Platform operation report could not be encoded.
     #[error("the terminal operation report could not be encoded")]
     ReportEncoding(#[from] serde_json::Error),
@@ -197,7 +200,7 @@ pub async fn receive_archive(
             StoreError::EmptyInput => ReceiptError::EmptyDelivery,
             other => ReceiptError::Storage(other),
         })?;
-    record_stored_archive(database, scope, mode, blob_ref, None).await
+    record_stored_archive(database, store, scope, mode, blob_ref, None).await
 }
 
 /// Receives a Platform-bound archive only when declared identity matches.
@@ -233,7 +236,7 @@ pub async fn receive_platform_archive(
             StoreError::DeclaredIdentityMismatch => ReceiptError::DeclaredIdentityMismatch,
             other => ReceiptError::Storage(other),
         })?;
-    record_stored_archive(database, scope, mode, blob_ref, None).await
+    record_stored_archive(database, store, scope, mode, blob_ref, None).await
 }
 
 /// Receives one Platform archive and durably records non-terminal import work.
@@ -274,7 +277,7 @@ pub async fn receive_platform_operation_archive(
             StoreError::DeclaredIdentityMismatch => ReceiptError::DeclaredIdentityMismatch,
             other => ReceiptError::Storage(other),
         })?;
-    record_stored_archive(database, scope, mode, blob_ref, Some(operation)).await
+    record_stored_archive(database, store, scope, mode, blob_ref, Some(operation)).await
 }
 
 /// Records a previously verified Platform archive and its operation-bound import work.
@@ -288,12 +291,14 @@ pub async fn receive_platform_operation_archive(
 /// cannot be committed atomically.
 pub async fn record_verified_platform_archive(
     database: &Database,
+    store: &BlobStore,
     scope: TenantScope,
     blob_ref: BlobRef,
     operation: PlatformOperation,
 ) -> Result<ReceiptOutcome, ReceiptError> {
     record_stored_archive(
         database,
+        store,
         scope,
         AcquisitionMode::ConsumerExport,
         blob_ref,
@@ -305,6 +310,7 @@ pub async fn record_verified_platform_archive(
 /// Records a verified raw archive and starts its import run.
 async fn record_stored_archive(
     database: &Database,
+    store: &BlobStore,
     scope: TenantScope,
     mode: AcquisitionMode,
     blob_ref: BlobRef,
@@ -321,6 +327,9 @@ async fn record_stored_archive(
     let ai_archive_id = Uuid::now_v7();
     let run_id = Uuid::now_v7();
     let mut transaction = database.pool().begin().await.map_err(ReceiptError::Query)?;
+    // The archive stream is gone once it is stored, so a blob an eraser removed in the meantime
+    // cannot be stored again here: the registration fails and the delivery is retried.
+    crate::blob_protocol::register(&mut transaction, store, &[&blob_ref], &[]).await?;
     let insert = sqlx::query(
         "insert into claude_archive.exports
              (export_id, ai_archive_id, account_ref, organization_ref, acquisition, archive_hash,

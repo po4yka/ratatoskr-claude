@@ -10,12 +10,25 @@ use super::{
     DeletionCompletionReport, FinalizationFault, PgPool, PrivacyDeletionExecutionError,
     PrivacyDeletionExecutor, ResolvedDeletionBlob, Uuid, lock_tenant,
 };
+use crate::blob_protocol::{blob_lock, referenced_among};
 
 impl PrivacyDeletionExecutor {
     /// Creates an executor over the Claude Archive database.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            erase_gate: None,
+        }
+    }
+
+    /// Parks the eraser at `gate` for every blob it erases.
+    ///
+    /// This is the blocking fault seam of the interleaving tests (XR-021 CONTRACTS.md R2-07).
+    #[must_use]
+    pub fn with_erase_gate(mut self, gate: super::EraseGate) -> Self {
+        self.erase_gate = Some(gate);
+        self
     }
 
     /// Removes the rows of one durable deletion request and completes it, without byte work.
@@ -98,6 +111,12 @@ impl PrivacyDeletionExecutor {
     }
 
     /// Phase B: erase every blob the remaining rows no longer reference.
+    ///
+    /// Each blob is one transaction: the tenant lock, then the digest lock, then the same
+    /// reference check the row phase used, then either keeping the blob (`retain_shared`) or
+    /// erasing it (`purged`), committed while the digest lock is held. A registrar that stored the
+    /// same bytes after the row phase therefore either shows up in the check or waits and finds
+    /// the blob gone (`blob_protocol` module).
     async fn erase_bytes(
         &self,
         request_id: Uuid,
@@ -121,16 +140,45 @@ impl PrivacyDeletionExecutor {
             if format!("sha256/{}", resolved.reference.digest_hex) != key {
                 return Err(PrivacyDeletionExecutionError::UnresolvedBlob);
             }
-            let _outcome = blob_store.erase(&resolved.reference)?;
-            sqlx::query(
-                "update claude_archive.privacy_deletion_items set state = 'purged'
-                 where request_id = $1 and item_index = $2",
-            )
-            .bind(request_id)
-            .bind(item_index)
-            .execute(&self.pool)
-            .await?;
+            self.erase_blob(request_id, item_index, &key, blob_store, resolved)
+                .await?;
         }
+        Ok(())
+    }
+
+    async fn erase_blob(
+        &self,
+        request_id: Uuid,
+        item_index: i32,
+        key: &str,
+        blob_store: &crate::BlobStore,
+        resolved: &ResolvedDeletionBlob,
+    ) -> Result<(), PrivacyDeletionExecutionError> {
+        let mut transaction = self.pool.begin().await?;
+        let request = load_request(&mut transaction, request_id).await?;
+        lock_tenant(&mut transaction, &request.tenant_ref).await?;
+        blob_lock(&mut transaction, &resolved.reference.digest_hex).await?;
+        let still_referenced = referenced_among(&mut transaction, &[key.to_owned()]).await?;
+        let outcome = if still_referenced.is_empty() {
+            if let Some(gate) = &self.erase_gate {
+                gate.park(&resolved.reference.digest_hex).await;
+            }
+            let _erased = blob_store.erase(&resolved.reference)?;
+            ("erase_blob", "purged")
+        } else {
+            ("retain_shared", "retained")
+        };
+        sqlx::query(
+            "update claude_archive.privacy_deletion_items set action = $3, state = $4
+             where request_id = $1 and item_index = $2",
+        )
+        .bind(request_id)
+        .bind(item_index)
+        .bind(outcome.0)
+        .bind(outcome.1)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 

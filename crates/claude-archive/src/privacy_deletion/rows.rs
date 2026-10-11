@@ -257,25 +257,30 @@ async fn delete_export_dependents(
 
 /// Turns an erase into a retain for every blob a remaining row still references.
 ///
-/// This replaces the exclusion subquery the byte phase used to run: the rows are already gone, so
-/// "referenced by something that remains" is a plain lookup.
+/// The rows are already gone, so "referenced by something that remains" is a plain lookup, the
+/// same one the eraser repeats under the digest lock before it removes any bytes.
 async fn retain_blobs_still_referenced(
     transaction: &mut Transaction<'_, Postgres>,
     request_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "update claude_archive.privacy_deletion_items i
-         set action = 'retain_shared', state = 'retained'
-         where i.request_id = $1 and i.action = 'erase_blob' and i.blob_ref is not null
-           and (exists (select 1 from claude_archive.exports e where e.blob_ref = i.blob_ref)
-             or exists (select 1 from claude_archive.extracted_artifacts x where x.blob_ref = i.blob_ref)
-             or exists (select 1 from claude_archive.project_sources s where s.blob_ref = i.blob_ref)
-             or exists (select 1 from claude_archive.content_parts p where p.blob_ref = i.blob_ref)
-             or exists (select 1 from claude_archive.artifact_versions v where v.blob_ref = i.blob_ref)
-             or exists (select 1 from claude_archive.assets a where a.blob_ref = i.blob_ref)
-             or exists (select 1 from claude_archive.projects pr where pr.instructions_blob_ref = i.blob_ref))",
+    let keys: Vec<String> = sqlx::query_scalar(
+        "select distinct blob_ref from claude_archive.privacy_deletion_items
+         where request_id = $1 and action = 'erase_blob' and blob_ref is not null",
     )
     .bind(request_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let referenced: Vec<String> = crate::blob_protocol::referenced_among(transaction, &keys)
+        .await?
+        .into_iter()
+        .collect();
+    sqlx::query(
+        "update claude_archive.privacy_deletion_items
+         set action = 'retain_shared', state = 'retained'
+         where request_id = $1 and action = 'erase_blob' and blob_ref = any($2)",
+    )
+    .bind(request_id)
+    .bind(&referenced)
     .execute(&mut **transaction)
     .await?;
     Ok(())

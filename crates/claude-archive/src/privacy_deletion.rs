@@ -242,6 +242,58 @@ pub struct PrivacyDeletionPlanner {
 #[derive(Debug, Clone)]
 pub struct PrivacyDeletionExecutor {
     pool: PgPool,
+    erase_gate: Option<EraseGate>,
+}
+
+/// Blocking seam that lets a test hold the eraser between two steps of one blob.
+///
+/// Two clones share one pair of signals: the eraser announces that it reached the gate and then
+/// waits to be released, so a test can run a registrar in exactly that window with two real
+/// connections. Production code never builds one.
+#[derive(Debug, Clone, Default)]
+pub struct EraseGate {
+    digest_hex: Option<String>,
+    reached: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl EraseGate {
+    /// Creates a gate that parks the eraser at every blob it erases.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a gate that parks the eraser only at the blob with this digest.
+    #[must_use]
+    pub fn for_digest(digest_hex: impl Into<String>) -> Self {
+        Self {
+            digest_hex: Some(digest_hex.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Resolves once the eraser has reached the gate.
+    pub async fn reached(&self) {
+        self.reached.notified().await;
+    }
+
+    /// Lets a parked eraser continue.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+
+    async fn park(&self, digest_hex: &str) {
+        if self
+            .digest_hex
+            .as_deref()
+            .is_some_and(|only| only != digest_hex)
+        {
+            return;
+        }
+        self.reached.notify_one();
+        self.release.notified().await;
+    }
 }
 
 /// Every `(table, column)` foreign key into a deletion root that is not `ON DELETE CASCADE` and

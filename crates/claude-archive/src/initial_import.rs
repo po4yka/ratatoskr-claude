@@ -19,7 +19,7 @@ use uuid::Uuid;
 use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
 
 use crate::contract_projection::{GapInput, ImportProjection, Omitted, ReportView, gaps_for};
-use crate::import_artifacts::persist_artifacts;
+use crate::import_artifacts::{persist_artifacts, register_blobs};
 use crate::reparse::{
     ReparseError, ReparsePlan, apply_conversations, compare, current_projection, decode_hex,
     encode_hex, read_parser_evidence,
@@ -40,12 +40,12 @@ pub struct InitialImportWorker {
 }
 
 #[derive(Debug)]
-struct PreparedInitialImport {
-    plan: ReparsePlan,
-    evidence_ref: BlobRef,
+pub(crate) struct PreparedInitialImport {
+    pub(crate) plan: ReparsePlan,
+    pub(crate) evidence_ref: BlobRef,
     completeness: crate::ArchiveCompletenessReport,
     detected: crate::DetectedSchema,
-    artifacts: Vec<crate::ReconciledArtifact>,
+    pub(crate) artifacts: Vec<crate::ReconciledArtifact>,
 }
 
 #[derive(Debug)]
@@ -294,6 +294,7 @@ impl InitialImportWorker {
             tx.rollback().await?;
             return Ok(());
         }
+        register_blobs(&mut tx, &self.blobs, prepared).await?;
         sqlx::query("insert into claude_archive.extracted_artifacts (extracted_artifact_id,export_id,artifact_index,artifact_kind,blob_ref,content_hash,byte_size) values ($1,$2,0,'entry',$3,$4,$5) on conflict (export_id,artifact_index) do nothing")
             .bind(Uuid::now_v7()).bind(prepared.plan.export_id).bind(format!("sha256/{}",prepared.evidence_ref.digest_hex))
             .bind(decode_hex(&prepared.evidence_ref.digest_hex).ok_or(ReparseError::Conflict)?)

@@ -464,6 +464,7 @@ async fn receive(
     match receiver.await {
         Ok(Ok(blob_ref)) => ratatoskr_claude_archive::receipt::record_verified_platform_archive(
             &state.database,
+            &state.blob_store,
             scope,
             blob_ref,
             operation,

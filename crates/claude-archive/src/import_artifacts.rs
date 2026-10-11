@@ -8,7 +8,41 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::artifact::{ArtifactVersionAvailability, ReconciledArtifact};
+use crate::initial_import::PreparedInitialImport;
 use crate::reparse::{ReparseError, ReparsePlan, decode_hex};
+use crate::{BlobRef, BlobStore};
+
+/// Takes the digest locks of every blob the import is about to reference and checks each is still
+/// stored (XR-021 CONTRACTS.md R2-07).
+///
+/// The import holds the parser evidence and the Artifact payloads, so a blob an eraser removed
+/// since it was stored is stored again from those bytes. Call it after the tenant lock and before
+/// the first row that references a blob.
+pub(crate) async fn register_blobs(
+    tx: &mut Transaction<'_, Postgres>,
+    store: &BlobStore,
+    prepared: &PreparedInitialImport,
+) -> Result<(), ReparseError> {
+    let mut references: Vec<&BlobRef> = vec![&prepared.evidence_ref];
+    let mut staged: Vec<&[u8]> = vec![prepared.plan.evidence.as_slice()];
+    for artifact in &prepared.artifacts {
+        for version in &artifact.versions {
+            if let ArtifactVersionAvailability::Verified { blob_ref } = &version.availability {
+                references.push(blob_ref);
+            }
+        }
+    }
+    for artifact in &prepared.plan.parsed.artifacts {
+        staged.extend(
+            artifact
+                .versions
+                .iter()
+                .filter_map(|version| version.bytes.as_deref()),
+        );
+    }
+    crate::blob_protocol::register(tx, store, &references, &staged).await?;
+    Ok(())
+}
 
 /// The one owner the schema allows an Artifact: a message, a conversation or a project.
 #[derive(Debug, Clone, Copy, Default)]
