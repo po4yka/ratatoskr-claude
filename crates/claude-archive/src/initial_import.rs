@@ -5,9 +5,10 @@ use std::sync::Arc;
 use ratatoskr_ai_archive_contracts::{
     AiArchiveCompleteness, AiArchiveOperationSummary, AiProvider,
 };
+use ratatoskr_error_contracts::{ErrorCode, WarningEnvelope};
 use ratatoskr_event_envelope::{EventEnvelope, EventPayload};
 use ratatoskr_identifiers::{
-    AiArchiveId, EntityRef, EventId, Extensions, OperationId, WireTimestamp,
+    AiArchiveId, EntityRef, EventId, Extensions, OperationId, SafeMessage, WireTimestamp,
 };
 use ratatoskr_operation_contracts::{
     OperationReported, OperationResultKind, OperationResultRef, OperationStatus,
@@ -29,6 +30,12 @@ use crate::{
     ParserExecutionInput, ParserIdentity, ParserRegistry, PlatformUsers,
 };
 
+/// The warning code of an import that left facts out because they exceed the event limit.
+const FACTS_TOO_LARGE_WARNING_CODE: &str = "ai_archive.facts.too_large";
+/// The user-facing text of [`FACTS_TOO_LARGE_WARNING_CODE`].
+const FACTS_TOO_LARGE_WARNING_MESSAGE: &str =
+    "Some conversations are too large to add to the library.";
+
 /// Restart-safe executor for stored raw archives and late operation bindings.
 #[derive(Debug, Clone)]
 pub struct InitialImportWorker {
@@ -37,6 +44,7 @@ pub struct InitialImportWorker {
     registry: Arc<ParserRegistry>,
     limits: Limits,
     platform_users: PlatformUsers,
+    max_event_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -75,7 +83,16 @@ impl InitialImportWorker {
             registry,
             limits,
             platform_users,
+            max_event_bytes: crate::config::DEFAULT_MAX_EVENT_BYTES,
         }
+    }
+
+    /// Sets the largest serialized event envelope this worker enqueues. A fact over it is not
+    /// enqueued and the import is reported as partial (XR-021 CONTRACTS.md R2-04).
+    #[must_use]
+    pub const fn with_max_event_bytes(mut self, max_event_bytes: usize) -> Self {
+        self.max_event_bytes = max_event_bytes;
+        self
     }
 
     /// Processes at most one import or one set of late operation correlations.
@@ -328,6 +345,7 @@ impl InitialImportWorker {
                     .collect(),
             },
             head_always: true,
+            max_event_bytes: self.max_event_bytes,
         }
         .publish(&mut tx)
         .await?;
@@ -420,6 +438,8 @@ struct ImportSummary {
     assets: u32,
     gaps: u32,
     warnings: u32,
+    /// Facts the import did not enqueue because they exceed the event limit.
+    too_large: bool,
 }
 
 impl ImportSummary {
@@ -431,6 +451,7 @@ impl ImportSummary {
             gaps: self
                 .gaps
                 .saturating_add(u32::try_from(omitted.gaps().len()).unwrap_or(u32::MAX)),
+            too_large: omitted.too_large > 0,
             ..self
         }
     }
@@ -453,6 +474,7 @@ fn summary_from(report: &crate::ArchiveCompletenessReport) -> ImportSummary {
         )
         .unwrap_or(u32::MAX),
         warnings: u32::try_from(report.warnings.len()).unwrap_or(u32::MAX),
+        too_large: false,
     }
 }
 
@@ -517,6 +539,7 @@ async fn load_summary(pool: &PgPool, run_id: Uuid) -> Result<ImportSummary, Repa
             .as_ref()
             .and_then(serde_json::Value::as_array)
             .map_or(0, |values| u32::try_from(values.len()).unwrap_or(u32::MAX)),
+        too_large: false,
     })
 }
 
@@ -602,12 +625,30 @@ fn operation_report(
         }],
         error: None,
         // A partial success without a diagnostic is invalid (S06 D3): the archive was imported,
-        // and the warning says it is not complete.
-        warnings: if status == OperationStatus::PartiallySucceeded {
-            vec![incomplete_import_warning()]
-        } else {
-            Vec::new()
-        },
+        // and the warning says it is not complete. Facts too large to enqueue are named as well,
+        // so the user is not told a success whose conversation Knowledge never receives (R2-04).
+        warnings: import_warnings(status, summary),
+        extensions: Extensions::new(),
+    })
+}
+
+fn import_warnings(status: OperationStatus, summary: ImportSummary) -> Vec<WarningEnvelope> {
+    let mut warnings = Vec::new();
+    if status == OperationStatus::PartiallySucceeded {
+        warnings.push(incomplete_import_warning());
+    }
+    if summary.too_large {
+        warnings.extend(facts_too_large_warning());
+    }
+    warnings
+}
+
+/// The warning for facts that exceed the event limit (XR-021 CONTRACTS.md R2-04 rule 4).
+fn facts_too_large_warning() -> Option<WarningEnvelope> {
+    Some(WarningEnvelope {
+        code: ErrorCode::parse(FACTS_TOO_LARGE_WARNING_CODE).ok()?,
+        message: SafeMessage::parse(FACTS_TOO_LARGE_WARNING_MESSAGE).ok()?,
+        field_path: None,
         extensions: Extensions::new(),
     })
 }
@@ -677,6 +718,7 @@ mod tests {
             assets: 0,
             gaps: 1,
             warnings: 0,
+            too_large: false,
         }
     }
 

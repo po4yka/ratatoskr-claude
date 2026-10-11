@@ -141,6 +141,7 @@ pub struct ReparseEngine {
     registry: Arc<ParserRegistry>,
     limits: Limits,
     platform_users: PlatformUsers,
+    max_event_bytes: usize,
 }
 
 impl ReparseEngine {
@@ -159,7 +160,16 @@ impl ReparseEngine {
             registry,
             limits,
             platform_users,
+            max_event_bytes: crate::config::DEFAULT_MAX_EVENT_BYTES,
         }
+    }
+
+    /// Sets the largest serialized event envelope this engine enqueues. A fact over it is not
+    /// enqueued (XR-021 CONTRACTS.md R2-04).
+    #[must_use]
+    pub const fn with_max_event_bytes(mut self, max_event_bytes: usize) -> Self {
+        self.max_event_bytes = max_event_bytes;
+        self
     }
 
     /// Produces a side-effect-free plan from verified raw evidence.
@@ -323,6 +333,7 @@ impl ReparseEngine {
             parser: &plan.target,
             report: ReportView::original(&mut tx, plan.export_id).await?,
             head_always: false,
+            max_event_bytes: self.max_event_bytes,
         }
         .publish(&mut tx)
         .await?;

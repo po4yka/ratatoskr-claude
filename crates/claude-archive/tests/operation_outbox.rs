@@ -346,11 +346,37 @@ async fn the_schema_refuses_an_event_type_outside_the_closed_list() {
     );
 }
 
-/// A payload over the broker's `max_payload` (1 MiB by default) is refused by the publish call
-/// itself, so no acknowledgement can ever arrive for it: the refusal path of the pump, driven by a
-/// real broker.
+/// The Prometheus handle of this test binary, installed once because a recorder is process-wide.
+fn metrics() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+    static HANDLE: std::sync::OnceLock<metrics_exporter_prometheus::PrometheusHandle> =
+        std::sync::OnceLock::new();
+    HANDLE.get_or_init(|| {
+        metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .expect("the first recorder of this process installs")
+    })
+}
+
+/// The row's `undeliverable_at` as JSON text, read without naming the column so the same query
+/// answers before and after the column exists.
+async fn undeliverable_at(db: &TestDatabase, event_id: Uuid) -> Option<String> {
+    sqlx::query_scalar(
+        "select to_jsonb(o) ->> 'undeliverable_at' from claude_archive.outbox_events o
+         where o.event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(db.database.pool())
+    .await
+    .expect("the row is readable")
+}
+
+/// A body larger than the connected server's `max_payload` can never be published, so retrying it
+/// forever would wedge the pump and keep readiness false (XR-021 CONTRACTS.md R2-04 rule 2). The
+/// row is marked undeliverable, counted, skipped, and the rows behind it are published in the same
+/// pass, which succeeds. The broker's own limit is read, never assumed.
 #[tokio::test]
-async fn a_refused_publish_backs_off_and_never_starves_the_rows_behind_it() {
+async fn an_undeliverable_row_does_not_wedge_the_pump() {
+    let recorder = metrics();
     let db = TestDatabase::create()
         .await
         .expect("a disposable database applies the definition");
@@ -359,7 +385,7 @@ async fn a_refused_publish_backs_off_and_never_starves_the_rows_behind_it() {
         serde_json::from_str(TOMBSTONE).expect("the tombstone fixture decodes");
     let added: AiConversationAdded =
         serde_json::from_str(CONVERSATION_ADDED).expect("the conversation fixture decodes");
-    let refused = outbox
+    let oversized = outbox
         .enqueue(
             &ArchiveEventFact::Tombstoned(tombstone),
             "2026-08-27T08:00:00Z".parse().expect("a canonical instant"),
@@ -373,35 +399,36 @@ async fn a_refused_publish_backs_off_and_never_starves_the_rows_behind_it() {
         )
         .await
         .expect("the conversation fact is enqueued");
+    let jetstream = connect().await;
+    let limit = jetstream.client().server_info().max_payload;
     sqlx::query(
         "update claude_archive.outbox_events
-         set envelope = jsonb_set(envelope, '{payload,padding}', to_jsonb(repeat('x', 2000000)))
+         set envelope = jsonb_set(envelope, '{payload,padding}', to_jsonb(repeat('x', $2)))
          where event_id = $1",
     )
-    .bind(refused.envelope.event_id.0)
+    .bind(oversized.envelope.event_id.0)
+    .bind(i32::try_from(limit + 2048).expect("the broker limit fits"))
     .execute(db.database.pool())
     .await
     .expect("the head row is padded past the broker payload limit");
-    let jetstream = connect().await;
     let stream = events_stream(&jetstream).await;
     let publisher = OutboxPublisher::new(db.database.pool().clone());
 
     let first_pass = publisher.publish_pending_with(&jetstream).await;
-    let refused_row: (bool, i32, Option<String>, bool) = sqlx::query_as(
-        "select published_at is not null, attempt_count, last_error, next_attempt_at > now()
+    assert!(
+        matches!(first_pass, Ok(1)),
+        "an undeliverable row is not a failed pass: the pass publishes the row behind it and \
+         succeeds, so readiness stays true: {first_pass:?}"
+    );
+    let marked = undeliverable_at(&db, oversized.envelope.event_id.0).await;
+    let (was_published, attempts, last_error): (bool, i32, Option<String>) = sqlx::query_as(
+        "select published_at is not null, attempt_count, last_error
          from claude_archive.outbox_events where event_id = $1",
     )
-    .bind(refused.envelope.event_id.0)
+    .bind(oversized.envelope.event_id.0)
     .fetch_one(db.database.pool())
     .await
-    .expect("the refused row is readable");
-    let delivered_row: bool = sqlx::query_scalar(
-        "select published_at is not null from claude_archive.outbox_events where event_id = $1",
-    )
-    .bind(deliverable.envelope.event_id.0)
-    .fetch_one(db.database.pool())
-    .await
-    .expect("the deliverable row is readable");
+    .expect("the oversized row is readable");
     let on_the_bus = published_on(
         &stream,
         "evt.ai_archive.conversation.added.v1",
@@ -409,30 +436,23 @@ async fn a_refused_publish_backs_off_and_never_starves_the_rows_behind_it() {
     )
     .await;
     let second_pass = publisher.publish_pending_with(&jetstream).await;
+    let pending = publisher
+        .pending_event_ids()
+        .await
+        .expect("the pending queue is readable");
+    let exposition = recorder.render();
     db.cleanup().await.expect("cleanup succeeds");
 
     assert!(
-        matches!(first_pass, Err(OutboxError::Broker(_))),
-        "a pass with a refused publish reports a non-fatal broker error: {first_pass:?}"
+        marked.is_some(),
+        "the oversized row is marked undeliverable"
     );
-    assert!(
-        first_pass.as_ref().is_err_and(|error| !error.is_fatal()),
-        "a refusal is retried, never fatal"
-    );
-    let (was_published, attempts, last_error, backed_off) = refused_row;
-    assert!(!was_published, "a refused row stays unpublished");
-    assert_eq!(attempts, 1, "the refused attempt is counted");
-    assert!(
-        matches!(last_error.as_deref(), Some("publish_failed" | "ack_failed")),
-        "the refusal records a safe error class, got {last_error:?}"
-    );
-    assert!(
-        backed_off,
-        "the refused row waits until a future attempt time"
-    );
-    assert!(
-        delivered_row,
-        "the row behind the refused one is published in the same pass"
+    assert!(!was_published, "an undeliverable row is never published");
+    assert_eq!(attempts, 0, "no publish was attempted for it");
+    assert_eq!(
+        last_error.as_deref(),
+        Some("payload_too_large"),
+        "the row records the safe class"
     );
     assert_eq!(
         on_the_bus,
@@ -441,6 +461,92 @@ async fn a_refused_publish_backs_off_and_never_starves_the_rows_behind_it() {
     );
     assert!(
         matches!(second_pass, Ok(0)),
+        "the next pass offers nothing: {second_pass:?}"
+    );
+    assert!(
+        pending.is_empty(),
+        "an undeliverable row leaves the pending queue: {pending:?}"
+    );
+    assert!(
+        exposition.lines().any(|line| line
+            .starts_with("claude_archive_outbox_undeliverable_total{")
+            && line.contains("class=\"payload_too_large\"")),
+        "the counter claude_archive_outbox_undeliverable_total{{class}} is exported: {exposition}"
+    );
+}
+
+/// A refusal that says nothing about the row (an unreachable broker, an acknowledgement that never
+/// arrives) is transient: it counts the attempt, records a safe class and backs off, and never
+/// marks the row undeliverable. It passes before the undeliverable column exists, and guards the
+/// classifier against ever treating an outage as a property of the row.
+#[tokio::test]
+async fn transient_refusals_never_make_a_row_undeliverable() {
+    let db = TestDatabase::create()
+        .await
+        .expect("a disposable database applies the definition");
+    let added: AiConversationAdded =
+        serde_json::from_str(CONVERSATION_ADDED).expect("the conversation fixture decodes");
+    let event = ArchiveOutbox::new(&db.database)
+        .enqueue(
+            &ArchiveEventFact::ConversationAdded(added),
+            "2026-08-27T09:00:00Z".parse().expect("a canonical instant"),
+        )
+        .await
+        .expect("the conversation fact is enqueued");
+    let client = async_nats::connect(nats_url())
+        .await
+        .expect("the test broker accepts a connection");
+    let impatient = async_nats::jetstream::new(client.clone());
+    // A drained client has left the broker: every publish through it fails, which is what the
+    // pump sees during an outage.
+    client.drain().await.expect("the client drains");
+    let publisher = OutboxPublisher::new(db.database.pool().clone());
+
+    let first_pass = publisher.publish_pending_with(&impatient).await;
+    let (was_published, attempts, last_error, backed_off): (bool, i32, Option<String>, bool) =
+        sqlx::query_as(
+            "select published_at is not null, attempt_count, last_error, next_attempt_at > now()
+             from claude_archive.outbox_events where event_id = $1",
+        )
+        .bind(event.envelope.event_id.0)
+        .fetch_one(db.database.pool())
+        .await
+        .expect("the refused row is readable");
+    let marked = undeliverable_at(&db, event.envelope.event_id.0).await;
+    let second_pass = publisher.publish_pending_with(&impatient).await;
+    sqlx::query(
+        "update claude_archive.outbox_events set next_attempt_at = now() where event_id = $1",
+    )
+    .bind(event.envelope.event_id.0)
+    .execute(db.database.pool())
+    .await
+    .expect("the backoff is released");
+    let recovered = publisher.publish_pending_with(&connect().await).await;
+    db.cleanup().await.expect("cleanup succeeds");
+
+    assert!(
+        first_pass
+            .as_ref()
+            .is_err_and(|error| matches!(error, OutboxError::Broker(_)) && !error.is_fatal()),
+        "a refused pass reports a non-fatal broker error: {first_pass:?}"
+    );
+    assert!(!was_published, "a refused row stays unpublished");
+    assert_eq!(attempts, 1, "the refused attempt is counted");
+    assert!(
+        matches!(last_error.as_deref(), Some("publish_failed" | "ack_failed")),
+        "the refusal records a transient class, got {last_error:?}"
+    );
+    assert!(
+        backed_off,
+        "the refused row waits until a future attempt time"
+    );
+    assert_eq!(marked, None, "a transient refusal never marks the row");
+    assert!(
+        matches!(second_pass, Ok(0)),
         "the backed-off row is not offered again before its time: {second_pass:?}"
+    );
+    assert!(
+        matches!(recovered, Ok(1)),
+        "once the broker answers, the same row is published: {recovered:?}"
     );
 }

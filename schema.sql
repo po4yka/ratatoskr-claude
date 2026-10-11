@@ -783,6 +783,7 @@ create table claude_archive.outbox_events (
     attempt_count   integer     not null default 0,
     next_attempt_at timestamptz,
     last_error      text,
+    undeliverable_at timestamptz,
     constraint outbox_events_event_type_check
         check (event_type in ('platform.operation.reported.v1',
                               'ai_archive.archive.imported.v1',
@@ -803,9 +804,12 @@ create table claude_archive.outbox_events (
 comment on table claude_archive.outbox_events is
     'Transactional outbox storing the complete published EventEnvelope. Rows become at-least-once publications; replay converges without rebuilding private payloads.';
 
+comment on column claude_archive.outbox_events.undeliverable_at is
+    'Set when the stored envelope is larger than the connected broker accepts, so retrying can never help. The pump skips the row, records last_error = payload_too_large, and the row never makes readiness false.';
+
 create index outbox_events_unpublished_idx
     on claude_archive.outbox_events (next_attempt_at)
-    where published_at is null;
+    where published_at is null and undeliverable_at is null;
 
 -- The projection reads the latest fact of every subject it announces; this is that lookup.
 create index outbox_events_subject_latest_idx

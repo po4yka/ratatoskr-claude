@@ -17,6 +17,12 @@ const OPERATION_REPORTED_SUBJECT: &str = "evt.ai-archive.claude.operation.report
 const BATCH_SIZE: i64 = 32;
 /// A background retry must not wait forever for an unavailable broker.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Room the broker needs beside the body for the subject and headers of one message.
+const HEADER_HEADROOM_BYTES: usize = 1024;
+/// The safe error class of a row whose body no publish can ever fit.
+const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
+/// Counts rows marked undeliverable, labelled by their safe class.
+const UNDELIVERABLE_METRIC: &str = "claude_archive_outbox_undeliverable_total";
 
 /// The subject an outbox event type is published on, or `None` outside the closed list.
 ///
@@ -39,7 +45,8 @@ pub(crate) fn subject_for_event_type(event_type: &str) -> Option<&'static str> {
 
 /// The unpublished rows a pass would offer next, oldest first.
 const PENDING_SQL: &str = "select event_id, event_type, envelope from claude_archive.outbox_events
-     where published_at is null and (next_attempt_at is null or next_attempt_at <= now())
+     where published_at is null and undeliverable_at is null
+       and (next_attempt_at is null or next_attempt_at <= now())
      order by occurred_at, event_id limit $1";
 
 /// The local outbox publisher for every archive event.
@@ -115,6 +122,13 @@ impl OutboxPublisher {
             .await
             .map_err(OutboxError::Database)?;
 
+        // The server limit is read from the connection, never assumed: a body over it is refused
+        // on every attempt, so it is a property of the row, not of the broker's mood.
+        let largest_body = jetstream
+            .client()
+            .server_info()
+            .max_payload
+            .saturating_sub(HEADER_HEADROOM_BYTES);
         let mut published = 0;
         let mut refused = 0_usize;
         for row in rows {
@@ -129,6 +143,10 @@ impl OutboxPublisher {
                 return Err(OutboxError::EnvelopeMismatch);
             }
             let body = serde_json::to_vec(&envelope).map_err(OutboxError::Encode)?;
+            if body.len() > largest_body {
+                self.mark_undeliverable(event_id).await?;
+                continue;
+            }
             let mut headers = async_nats::HeaderMap::new();
             headers.insert("Nats-Msg-Id", event_id.to_string());
             let acknowledged = match jetstream
@@ -153,6 +171,28 @@ impl OutboxPublisher {
             return Err(OutboxError::broker_refused());
         }
         Ok(published)
+    }
+
+    /// Retires a row whose body is larger than the broker accepts: no retry can ever succeed, so
+    /// the pass skips it and goes on, and it never counts as a refused publish. Only the safe
+    /// class is logged and exported.
+    async fn mark_undeliverable(&self, event_id: Uuid) -> Result<(), OutboxError> {
+        sqlx::query(
+            "update claude_archive.outbox_events
+             set undeliverable_at = now(), last_error = $2
+             where event_id = $1 and published_at is null and undeliverable_at is null",
+        )
+        .bind(event_id)
+        .bind(PAYLOAD_TOO_LARGE)
+        .execute(&self.pool)
+        .await
+        .map_err(OutboxError::Database)?;
+        metrics::counter!(UNDELIVERABLE_METRIC, "class" => PAYLOAD_TOO_LARGE).increment(1);
+        tracing::warn!(
+            class = PAYLOAD_TOO_LARGE,
+            "an archive event is larger than the broker accepts and was marked undeliverable"
+        );
+        Ok(())
     }
 
     async fn mark_published(&self, event_id: Uuid) -> Result<(), OutboxError> {

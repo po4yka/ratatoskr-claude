@@ -5,10 +5,10 @@
 
 ## 2. Size guard, undeliverable rows and honest reports (R2-04 rules 2 and 4)
 
-- [ ] 2.1 RED: `crates/claude-archive/tests/contract_projection.rs` adds `a_fact_over_the_event_limit_is_not_enqueued_and_the_import_is_partial`; it fails because the oversized conversation is enqueued and the report is `succeeded`.
-- [ ] 2.2 RED: `crates/claude-archive/tests/operation_outbox.rs` adds `an_undeliverable_row_does_not_wedge_the_pump` and `transient_refusals_never_make_a_row_undeliverable` against a real JetStream with a small `max_payload`; the first fails because the pump retries the large row forever and readiness stays false.
-- [ ] 2.3 GREEN: the `RATATOSKR__RECEIPT__MAX_EVENT_BYTES` key, the enqueue-time guard and the `ai_archive.facts.too_large` warning.
-- [ ] 2.4 GREEN: `outbox_events.undeliverable_at` in `schema.sql`, the pump's payload comparison, `claude_archive_outbox_undeliverable_total{class}`.
+- [x] 2.1 RED: `crates/claude-archive/tests/fact_size_guard.rs` adds `a_fact_over_the_event_limit_is_not_enqueued_and_the_import_is_partial` (a new file, because `contract_projection.rs` is at 736 lines and the 850 line cap leaves no room): a conversation no 65 536 byte envelope can hold sits beside a small one; it fails because the oversized conversation is enqueued. `tests/config.rs` adds `the_event_size_guard_defaults_to_eight_million_bytes` and `the_event_size_guard_accepts_only_its_documented_range`; the range test fails because the key is "not recognized" (the field and the builder methods were stubs).
+- [x] 2.2 RED: `crates/claude-archive/tests/operation_outbox.rs` adds `an_undeliverable_row_does_not_wedge_the_pump` against a real JetStream, padding a row past the connected server's own `max_payload`; it fails because the pass returns a broker error and the row is retried forever. It replaces `a_refused_publish_backs_off_and_never_starves_the_rows_behind_it`, whose premise (a body over the broker limit is a transient refusal) is the bug. `transient_refusals_never_make_a_row_undeliverable` keeps the backoff behaviour for a real outage (a drained client) and is a regression guard: it reads `undeliverable_at` through `to_jsonb`, so it passes before the column exists and guards the classifier afterwards.
+- [x] 2.3 GREEN: the `RATATOSKR__RECEIPT__MAX_EVENT_BYTES` key, `with_max_event_bytes` on the import worker and the reparse engine, the enqueue-time guard in `contract_projection.rs`, the `fact_too_large` head gap and the `ai_archive.facts.too_large` operation warning.
+- [x] 2.4 GREEN: `outbox_events.undeliverable_at` in `schema.sql`, the pump's payload comparison, `claude_archive_outbox_undeliverable_total{class}`.
 
 ## 3. Operator example and documentation (R2-10)
 

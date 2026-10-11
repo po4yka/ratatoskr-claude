@@ -41,7 +41,18 @@ pub struct ReceiptConfig {
     /// Absolute `NATS` `NKey` seed path for the Claude service identity.
     #[serde(skip_serializing)]
     pub event_bus_nkey_seed_path: Option<PathBuf>,
+    /// Largest serialized `ai_archive.*` event envelope the import enqueues, in bytes. A fact
+    /// over it is not enqueued and the import is reported as partial (XR-021 CONTRACTS.md R2-04).
+    pub max_event_bytes: usize,
 }
+
+/// The default of [`ReceiptConfig::max_event_bytes`]: below the 8 MiB broker payload limit that
+/// Platform's NATS configuration sets.
+pub const DEFAULT_MAX_EVENT_BYTES: usize = 8_000_000;
+/// The smallest accepted [`ReceiptConfig::max_event_bytes`].
+const MIN_EVENT_BYTES: usize = 65_536;
+/// The largest accepted [`ReceiptConfig::max_event_bytes`]: the 8 MiB broker payload limit.
+const MAX_EVENT_BYTES: usize = 8_388_608;
 
 impl std::fmt::Debug for ReceiptConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,6 +62,7 @@ impl std::fmt::Debug for ReceiptConfig {
             .field("platform_accounts", &self.platform_accounts.len())
             .field("event_bus_url", &"[REDACTED]")
             .field("event_bus_nkey_seed_path", &"[REDACTED]")
+            .field("max_event_bytes", &self.max_event_bytes)
             .finish()
     }
 }
@@ -319,44 +331,58 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
                 violations.push(refused("must be an absolute file path"));
             }
         }
+        "RATATOSKR__RECEIPT__MAX_EVENT_BYTES" => match value.parse::<usize>() {
+            Ok(parsed) if (MIN_EVENT_BYTES..=MAX_EVENT_BYTES).contains(&parsed) => {
+                config.receipt.max_event_bytes = parsed;
+            }
+            _ => violations.push(refused("must be an integer from 65536 to 8388608")),
+        },
         "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS" => match parse_platform_accounts(value) {
             Ok(accounts) => config.receipt.platform_accounts = accounts,
             Err(rule) => violations.push(refused(rule)),
         },
-        "RATATOSKR__LIMITS__DATABASE_CONNECTIONS" => match parse_positive::<u32>(value) {
-            Ok(parsed) => config.limits.database_connections = parsed,
-            Err(rule) => violations.push(refused(rule)),
+        _ => match apply_limit_entry(&mut config.limits, key, value) {
+            Some(Ok(())) => {}
+            Some(Err(rule)) => violations.push(refused(rule)),
+            None => violations.push(refused("is not recognized")),
         },
-        "RATATOSKR__LIMITS__DATABASE_ACQUIRE_TIMEOUT_MS" => match parse_positive::<u64>(value) {
-            Ok(parsed) => config.limits.database_acquire_timeout_ms = parsed,
-            Err(rule) => violations.push(refused(rule)),
-        },
-        "RATATOSKR__LIMITS__SHUTDOWN_TIMEOUT_MS" => match parse_positive::<u64>(value) {
-            Ok(parsed) => config.limits.shutdown_timeout_ms = parsed,
-            Err(rule) => violations.push(refused(rule)),
-        },
-        "RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES" => match parse_positive::<u64>(value) {
-            Ok(parsed) => config.limits.max_archive_bytes = parsed,
-            Err(rule) => violations.push(refused(rule)),
-        },
-        "RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRIES" => match parse_positive::<u32>(value) {
-            Ok(parsed) => config.limits.max_archive_entries = parsed,
-            Err(rule) => violations.push(refused(rule)),
-        },
-        "RATATOSKR__LIMITS__MAX_ENTRY_BYTES" => match parse_positive::<u64>(value) {
-            Ok(parsed) => config.limits.max_entry_bytes = parsed,
-            Err(rule) => violations.push(refused(rule)),
-        },
-        "RATATOSKR__LIMITS__MAX_TOTAL_EXTRACTED_BYTES" => match parse_positive::<u64>(value) {
-            Ok(parsed) => config.limits.max_total_extracted_bytes = parsed,
-            Err(rule) => violations.push(refused(rule)),
-        },
-        "RATATOSKR__LIMITS__MAX_COMPRESSION_RATIO" => match parse_positive::<u32>(value) {
-            Ok(parsed) => config.limits.max_compression_ratio = parsed,
-            Err(rule) => violations.push(refused(rule)),
-        },
-        _ => violations.push(refused("is not recognized")),
     }
+}
+
+/// Applies one `RATATOSKR__LIMITS__*` entry; `None` when `key` is not a limit.
+fn apply_limit_entry(
+    limits: &mut Limits,
+    key: &str,
+    value: &str,
+) -> Option<Result<(), &'static str>> {
+    let applied = match key {
+        "RATATOSKR__LIMITS__DATABASE_CONNECTIONS" => {
+            parse_positive::<u32>(value).map(|parsed| limits.database_connections = parsed)
+        }
+        "RATATOSKR__LIMITS__DATABASE_ACQUIRE_TIMEOUT_MS" => {
+            parse_positive::<u64>(value).map(|parsed| limits.database_acquire_timeout_ms = parsed)
+        }
+        "RATATOSKR__LIMITS__SHUTDOWN_TIMEOUT_MS" => {
+            parse_positive::<u64>(value).map(|parsed| limits.shutdown_timeout_ms = parsed)
+        }
+        "RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES" => {
+            parse_positive::<u64>(value).map(|parsed| limits.max_archive_bytes = parsed)
+        }
+        "RATATOSKR__LIMITS__MAX_ARCHIVE_ENTRIES" => {
+            parse_positive::<u32>(value).map(|parsed| limits.max_archive_entries = parsed)
+        }
+        "RATATOSKR__LIMITS__MAX_ENTRY_BYTES" => {
+            parse_positive::<u64>(value).map(|parsed| limits.max_entry_bytes = parsed)
+        }
+        "RATATOSKR__LIMITS__MAX_TOTAL_EXTRACTED_BYTES" => {
+            parse_positive::<u64>(value).map(|parsed| limits.max_total_extracted_bytes = parsed)
+        }
+        "RATATOSKR__LIMITS__MAX_COMPRESSION_RATIO" => {
+            parse_positive::<u32>(value).map(|parsed| limits.max_compression_ratio = parsed)
+        }
+        _ => return None,
+    };
+    Some(applied)
 }
 
 /// Parses `user=account` pairs. The owner of a fact is looked up from its account, so a user or an
@@ -431,6 +457,7 @@ impl Default for Config {
                 platform_accounts: Vec::new(),
                 event_bus_url: None,
                 event_bus_nkey_seed_path: None,
+                max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
             },
         }
     }

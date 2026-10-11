@@ -313,6 +313,20 @@ fn build_envelope(
 }
 
 impl ArchiveEventFact {
+    /// The length in bytes of the complete envelope this fact is stored and published as.
+    ///
+    /// The envelope is the message body the pump sends, so this is the number the event size
+    /// guard compares with the configured limit (XR-021 CONTRACTS.md R2-04).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveEventError`] when the fact cannot be placed in an envelope.
+    pub(crate) fn wire_len(&self, occurred_at: WireTimestamp) -> Result<usize, ArchiveEventError> {
+        let event_id = EventId::new_v7();
+        let envelope = build_envelope(event_id, self, occurred_at, &event_id.as_entity_ref())?;
+        Ok(serde_json::to_vec(&envelope)?.len())
+    }
+
     fn aggregate(&self) -> Result<(&'static str, String), ArchiveEventError> {
         let (reference, _) = self.aggregate_reference()?;
         let kind = match self {

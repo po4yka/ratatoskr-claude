@@ -55,6 +55,7 @@ pub struct OperatorContext {
     registry: Arc<ParserRegistry>,
     limits: ratatoskr_claude_archive::Limits,
     platform_users: PlatformUsers,
+    max_event_bytes: usize,
 }
 
 impl OperatorContext {
@@ -95,6 +96,7 @@ impl OperatorContext {
             registry: Arc::new(registry),
             limits: config.limits,
             platform_users: PlatformUsers::new(&config.receipt.platform_accounts),
+            max_event_bytes: config.receipt.max_event_bytes,
         })
     }
 
@@ -356,6 +358,7 @@ impl OperatorContext {
             self.limits.clone(),
             self.platform_users.clone(),
         )
+        .with_max_event_bytes(self.max_event_bytes)
     }
 
     async fn load_portable_state(

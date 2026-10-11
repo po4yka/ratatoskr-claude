@@ -396,3 +396,42 @@ fn one_platform_user_may_not_map_to_two_accounts() {
         "the violation names the mapping: {error}"
     );
 }
+
+#[test]
+fn the_event_size_guard_defaults_to_eight_million_bytes() {
+    let config =
+        Config::from_environment(minimal_environment()).expect("the minimal environment is valid");
+
+    assert_eq!(
+        config.receipt.max_event_bytes, 8_000_000,
+        "XR-021 CONTRACTS.md R2-04: the enqueue guard is 8000000 bytes unless configured"
+    );
+}
+
+#[test]
+fn the_event_size_guard_accepts_only_its_documented_range() {
+    for accepted in ["65536", "8000000", "8388608"] {
+        let mut environment = minimal_environment();
+        environment.push(("RATATOSKR__RECEIPT__MAX_EVENT_BYTES", accepted));
+        let config = Config::from_environment(environment)
+            .unwrap_or_else(|_| panic!("{accepted} is inside 65536..=8388608"));
+        assert_eq!(
+            config.receipt.max_event_bytes,
+            accepted.parse::<usize>().expect("a test literal"),
+            "the configured guard is used as given"
+        );
+    }
+    for refused in ["65535", "8388609", "0", "-1", "eight", ""] {
+        let mut environment = minimal_environment();
+        environment.push(("RATATOSKR__RECEIPT__MAX_EVENT_BYTES", refused));
+        let error = Config::from_environment(environment)
+            .expect_err("a value outside 65536..=8388608 must be refused");
+        assert!(
+            error
+                .violations
+                .iter()
+                .any(|violation| violation.key == "RATATOSKR__RECEIPT__MAX_EVENT_BYTES"),
+            "{refused:?} is refused by naming its key"
+        );
+    }
+}

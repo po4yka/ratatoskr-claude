@@ -265,6 +265,7 @@ async fn tokio_main() -> Result<(), ExitCode> {
         &blob_store,
         &config.limits,
         PlatformUsers::new(&config.receipt.platform_accounts),
+        config.receipt.max_event_bytes,
         Arc::clone(&runtime),
     )?;
     runtime.mark_startup_complete();
@@ -438,6 +439,7 @@ fn start_initial_importer(
     blob_store: &BlobStore,
     limits: &ratatoskr_claude_archive::Limits,
     platform_users: PlatformUsers,
+    max_event_bytes: usize,
     runtime: Arc<RuntimeState>,
 ) -> Result<tokio::task::JoinHandle<()>, ExitCode> {
     runtime.set_initial_import_worker_ready(false);
@@ -452,7 +454,8 @@ fn start_initial_importer(
             Arc::new(registry),
             limits.clone(),
             platform_users,
-        ),
+        )
+        .with_max_event_bytes(max_event_bytes),
         runtime,
     ))
 }

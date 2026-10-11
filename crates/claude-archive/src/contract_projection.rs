@@ -113,11 +113,14 @@ pub(crate) struct Omitted {
     pub(crate) projects: u64,
     pub(crate) conversations: u64,
     pub(crate) artifacts: u64,
+    /// Facts whose serialized envelope is larger than the configured event limit. They are never
+    /// enqueued and never truncated or split (XR-021 CONTRACTS.md R2-04 rule 4).
+    pub(crate) too_large: u64,
 }
 
 impl Omitted {
     pub(crate) const fn is_empty(self) -> bool {
-        self.projects == 0 && self.conversations == 0 && self.artifacts == 0
+        self.projects == 0 && self.conversations == 0 && self.artifacts == 0 && self.too_large == 0
     }
 
     /// One gap per kind that lost a subject.
@@ -138,6 +141,11 @@ impl Omitted {
                 self.artifacts,
                 "unprojected_artifact",
                 "Artifacts without verified bytes could not be projected into facts.",
+            ),
+            (
+                self.too_large,
+                "fact_too_large",
+                "Subjects larger than the event limit were not announced.",
             ),
         ] {
             if count > 0 {
@@ -169,6 +177,8 @@ pub(crate) struct ImportProjection<'a> {
     /// The initial import reports its head even when it holds nothing; a reparse only when it
     /// changed something.
     pub(crate) head_always: bool,
+    /// The largest serialized envelope a fact may have and still be enqueued.
+    pub(crate) max_event_bytes: usize,
 }
 
 /// The record counts that decide which gaps an import must name.
@@ -338,6 +348,7 @@ impl ImportProjection<'_> {
             )
             .await?,
         );
+        let subjects = self.within_the_event_limit(subjects, &mut omitted)?;
         // An omission alone is reason enough to re-announce the head: it is the only place the
         // loss is visible.
         if subjects.is_empty() && !self.head_always && omitted.is_empty() {
@@ -361,6 +372,31 @@ impl ImportProjection<'_> {
             ArchiveOutbox::enqueue_in(transaction, &fact, WireTimestamp::now()).await?;
         }
         Ok(omitted)
+    }
+
+    /// The facts that fit the event limit; each other fact is counted in `omitted` and dropped.
+    ///
+    /// A fact is never truncated or split. The publish-time check in the pump stays as the
+    /// backstop for a broker whose limit is lower than the configured one.
+    fn within_the_event_limit(
+        &self,
+        subjects: Vec<ArchiveEventFact>,
+        omitted: &mut Omitted,
+    ) -> Result<Vec<ArchiveEventFact>, ReparseError> {
+        let measured_at = WireTimestamp::now();
+        let mut kept = Vec::with_capacity(subjects.len());
+        for fact in subjects {
+            if fact.wire_len(measured_at)? > self.max_event_bytes {
+                tracing::warn!(
+                    class = "fact_too_large",
+                    "a fact exceeds the event size limit and is not enqueued"
+                );
+                omitted.too_large += 1;
+            } else {
+                kept.push(fact);
+            }
+        }
+        Ok(kept)
     }
 
     /// The Artifact facts of the export that changed, in the order the import announces them.
