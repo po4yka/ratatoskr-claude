@@ -8,7 +8,7 @@
     reason = "integration-test scaffolding: a failed setup step must fail the test loudly"
 )]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ratatoskr_claude_archive::blob_store::scratch::{remove, temp_root};
 use ratatoskr_claude_archive::test_support::TestDatabase;
@@ -183,15 +183,30 @@ impl std::io::Write for Captured {
     }
 }
 
+/// Installs the process-wide subscriber once and returns the buffer it fills.
+///
+/// It is global on purpose. Tests of one binary run on separate threads, and a thread-local
+/// subscriber leaves the `warn!` callsite of `mark_permanent_failure` cached as disabled whenever
+/// another test reaches it first: the log assertion then fails depending on the schedule. The
+/// events of every test land in the one buffer and each assertion filters by its own run id.
+fn captured_log() -> &'static Captured {
+    static LOG: OnceLock<Captured> = OnceLock::new();
+    LOG.get_or_init(|| {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other subscriber is installed in this test binary");
+        captured
+    })
+}
+
 #[tokio::test]
 async fn a_permanent_import_failure_is_logged_with_a_class() {
-    let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .json()
-        .with_writer(move || writer.clone())
-        .finish();
-    let _installed = tracing::subscriber::set_default(subscriber);
+    let captured = captured_log();
     let db = TestDatabase::create()
         .await
         .expect("a disposable database applies the definition");
