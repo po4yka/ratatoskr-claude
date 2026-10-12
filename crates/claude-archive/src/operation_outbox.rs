@@ -437,12 +437,17 @@ impl OutboxPublisher {
     }
 
     /// Counts a resend and schedules the next one, doubling the wait up to the cap.
+    ///
+    /// The wait is computed in seconds as a float and clamped to the cap before it becomes an
+    /// interval, and the exponent is bounded: a row resent for months has a doubling far past the
+    /// range of a `PostgreSQL` interval, and the resend never stops by count (R5-11 rule 4).
     async fn mark_resent(&self, event_id: Uuid) -> Result<(), OutboxError> {
         sqlx::query(
             "update claude_archive.outbox_events
              set resend_count = resend_count + 1, last_error = null,
-                 next_resend_at = now() + least(make_interval(secs => $2) * power(2, resend_count),
-                                                make_interval(secs => $3))
+                 next_resend_at = now() + make_interval(
+                     secs => least($3::float8,
+                                   $2::float8 * power(2::float8, least(resend_count, 60))))
              where event_id = $1 and acknowledged_at is null",
         )
         .bind(event_id)

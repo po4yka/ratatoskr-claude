@@ -221,6 +221,53 @@ async fn a_due_tombstone_is_published_again_with_a_doubling_delay_up_to_the_cap(
 }
 
 #[tokio::test]
+async fn a_resend_never_stops_by_count_however_many_times_the_row_was_resent() {
+    // XR-021 CONTRACTS.md R5-11 rule 4: the resend stops only at the acknowledgement. The doubling
+    // wait is clamped before it is multiplied, so a row resent for months keeps being rescheduled
+    // at the cap instead of overflowing the interval arithmetic.
+    for resent in [33_i32, 34, 40, 1000, i32::MAX - 1] {
+        let db = TestDatabase::create().await.expect("a disposable database");
+        let pool = db.database.pool();
+        let event_id = enqueue_tombstone(&db, OWNER).await;
+        let jetstream = connect().await;
+        let publisher = publisher(pool);
+        publisher
+            .publish_pending_with(&jetstream)
+            .await
+            .expect("the first publish succeeds");
+        sqlx::query(
+            "update claude_archive.outbox_events set resend_count = $2 where event_id = $1",
+        )
+        .bind(event_id)
+        .bind(resent)
+        .execute(pool)
+        .await
+        .expect("the resend count is set");
+        make_due(pool, event_id).await;
+        let pass = publisher.publish_pending_with(&jetstream).await;
+        let row = state(pool, event_id).await;
+        let next_pass = publisher.publish_pending_with(&jetstream).await;
+        db.cleanup().await.expect("cleanup succeeds");
+
+        assert!(
+            matches!(pass, Ok(1)),
+            "{resent}: a resend that was repeated {resent} times still succeeds: {pass:?}"
+        );
+        assert_eq!(row.3, resent + 1, "{resent}: the resend is counted");
+        assert!(
+            row.4
+                .is_some_and(|delay| (delay - CAP.as_secs_f64()).abs() < 1.5),
+            "{resent}: the next resend is scheduled at exactly the cap: {:?}",
+            row.4
+        );
+        assert!(
+            matches!(next_pass, Ok(0)),
+            "{resent}: the row is no longer due, so the pump has nothing left to refuse: {next_pass:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_acknowledgement_ends_the_resend_and_records_the_outcome() {
     for outcome in ["applied", "refused"] {
         let db = TestDatabase::create().await.expect("a disposable database");
