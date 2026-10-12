@@ -398,20 +398,18 @@ async fn a_store_failure_while_ingesting_is_retried_not_failed() {
     assert_eq!(result.operation.status, OperationStatus::Succeeded);
 }
 
-#[tokio::test]
-async fn an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_leave_a_dangling_row()
-{
-    // The account's only export is deleted: its rows are gone, its knowledge blob is listed for
-    // erasure and nothing references it yet.
-    let series = Series::open("knowledge-erase-race").await;
-    let (export_id, _) = series.import(&export_with(vec![verified_file()])).await;
-    let wide = Database::connect(
-        &database_url(series.db.name()),
-        6,
-        std::time::Duration::from_secs(10),
-    )
-    .await
-    .expect("a wider pool connects");
+/// The deletion of the series' only export, stopped after its rows are committed: the knowledge
+/// blob is listed for erasure and nothing references it.
+struct Purging {
+    request: Uuid,
+    resolved: Vec<ResolvedDeletionBlob>,
+}
+
+async fn purge_the_only_export(
+    series: &Series,
+    export_id: Uuid,
+    executor: &PrivacyDeletionExecutor,
+) -> Purging {
     let request = Uuid::now_v7();
     PrivacyDeletionPlanner::new(series.pool().clone())
         .plan_raw_export(&RawExportDeletionPlanRequest {
@@ -432,9 +430,8 @@ async fn an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_le
     .fetch_all(series.pool())
     .await
     .expect("the erase items are readable");
-    let knowledge_key = format!("sha256/{}", digest_of(GARDEN_PLAN));
     assert!(
-        keys.contains(&knowledge_key),
+        keys.contains(&format!("sha256/{}", digest_of(GARDEN_PLAN))),
         "the knowledge blob of the deleted project is an erase item"
     );
     let resolved: Vec<ResolvedDeletionBlob> = keys
@@ -449,7 +446,6 @@ async fn an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_le
             }
         })
         .collect();
-    let executor = PrivacyDeletionExecutor::new(wide.pool().clone());
     let stopped = executor
         .finalize_with_blob_store(
             request,
@@ -467,19 +463,32 @@ async fn an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_le
         ),
         "the deletion stops after its rows are committed and before any byte is erased"
     );
+    Purging { request, resolved }
+}
+
+#[tokio::test]
+async fn an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_leave_a_dangling_row()
+{
+    let series = Series::open("knowledge-erase-race").await;
+    let (export_id, _) = series.import(&export_with(vec![verified_file()])).await;
+    let wide = Database::connect(
+        &database_url(series.db.name()),
+        6,
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .expect("a wider pool connects");
+    let executor = PrivacyDeletionExecutor::new(wide.pool().clone());
+    let purging = purge_the_only_export(&series, export_id, &executor).await;
 
     // The eraser has decided to remove the knowledge blob and holds its digest lock when another
     // account's identical file is ingested and its import is about to register it.
     let gate = EraseGate::for_digest(digest_of(GARDEN_PLAN));
     let eraser = {
-        let (executor, store, resolved) = (
-            executor.with_erase_gate(gate.clone()),
-            series.store.clone(),
-            resolved.clone(),
-        );
+        let (executor, store) = (executor.with_erase_gate(gate.clone()), series.store.clone());
         tokio::spawn(async move {
             executor
-                .finalize_with_blob_store(request, &store, &resolved, None)
+                .finalize_with_blob_store(purging.request, &store, &purging.resolved, None)
                 .await
                 .expect("the byte phase completes");
         })
@@ -508,7 +517,7 @@ async fn an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_le
     .fetch_optional(series.pool())
     .await
     .expect("the sources are readable");
-    let resolves = series
+    let stored_again = series
         .store
         .locate(&digest_of(GARDEN_PLAN))
         .and_then(|blob| series.store.verify(&blob));
@@ -522,12 +531,12 @@ async fn an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_le
     assert_eq!(passes.expect("the import survives the erasure"), 1);
     assert_eq!(
         row,
-        Some((Some(knowledge_key),)),
+        Some((Some(format!("sha256/{}", digest_of(GARDEN_PLAN))),)),
         "the import committed its source row"
     );
     assert!(
-        resolves.is_ok(),
+        stored_again.is_ok(),
         "the importer stored the blob again after the eraser removed it, so the row resolves: \
-         {resolves:?}"
+         {stored_again:?}"
     );
 }
