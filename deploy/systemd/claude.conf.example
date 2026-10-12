@@ -21,3 +21,7 @@ RATATOSKR__RECEIPT__EVENT_BUS_NKEY_SEED_PATH=/etc/ratatoskr/claude.nkey
 # Size limits. The largest accepted archive equals the receivers' default and is at least what Platform accepts (RATATOSKR__ARCHIVE_STAGING__MAX_ARCHIVE_BYTES defaults to 2 GiB). The event limit (65536..=8388608) bounds one published `ai_archive.*` envelope; a fact over it is not enqueued and the import is reported as partial. It stays below the broker's `max_payload: 8MB`.
 RATATOSKR__LIMITS__MAX_ARCHIVE_BYTES=10737418240
 RATATOSKR__RECEIPT__MAX_EVENT_BYTES=8000000
+
+# Tombstone resend (XR-021 CONTRACTS.md R5-11). The events stream drops its oldest message at 7 days or 1 GiB, so a tombstone stays in the outbox and is published again, unchanged and with the same message id, until Knowledge acknowledges it. A published tombstone waits RESEND_AFTER seconds (30..=86400) for the acknowledgement; each resend doubles the wait up to RESEND_CAP seconds (at least RESEND_AFTER, at most 604800). The stream collapses a repeated message id inside its 120 second duplicate window, so a smaller value only helps a test: the 600 second default is deliberate, and a native check that wants to see a second stream copy must set at least 150. `claude_archive_unacknowledged_tombstones` and `claude_archive_oldest_unacknowledged_tombstone_age_seconds` on the operator listener show the backlog; readiness does not depend on it.
+RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS=600
+RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS=21600

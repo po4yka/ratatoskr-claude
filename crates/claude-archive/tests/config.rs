@@ -436,6 +436,70 @@ fn the_event_size_guard_accepts_only_its_documented_range() {
     }
 }
 
+#[test]
+fn the_tombstone_resend_defaults_to_ten_minutes_and_six_hours() {
+    let config =
+        Config::from_environment(minimal_environment()).expect("the minimal environment is valid");
+
+    assert_eq!(
+        (
+            config.tombstone.resend_after_seconds,
+            config.tombstone.resend_cap_seconds
+        ),
+        (600, 21_600),
+        "XR-021 CONTRACTS.md R5-11: the defaults are 600 s and 21600 s"
+    );
+}
+
+#[test]
+fn the_tombstone_resend_accepts_only_its_documented_ranges() {
+    for (after, cap) in [
+        ("30", "30"),
+        ("600", "21600"),
+        ("86400", "604800"),
+        ("30", "604800"),
+    ] {
+        let mut environment = minimal_environment();
+        environment.push(("RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS", after));
+        environment.push(("RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS", cap));
+        let config = Config::from_environment(environment)
+            .unwrap_or_else(|_| panic!("{after}/{cap} is inside the documented ranges"));
+        assert_eq!(
+            (
+                config.tombstone.resend_after_seconds.to_string(),
+                config.tombstone.resend_cap_seconds.to_string()
+            ),
+            (after.to_owned(), cap.to_owned()),
+            "the configured values are used as given"
+        );
+    }
+    for (after, cap, key) in [
+        ("29", "21600", "RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS"),
+        (
+            "86401",
+            "604800",
+            "RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS",
+        ),
+        ("ten", "21600", "RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS"),
+        ("600", "604801", "RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS"),
+        ("600", "599", "RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS"),
+        ("600", "", "RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS"),
+    ] {
+        let mut environment = minimal_environment();
+        environment.push(("RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS", after));
+        environment.push(("RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS", cap));
+        let error = Config::from_environment(environment)
+            .expect_err("a value outside its documented range must be refused");
+        assert!(
+            error
+                .violations
+                .iter()
+                .any(|violation| violation.key == key),
+            "{after}/{cap} is refused by naming {key}: {error}"
+        );
+    }
+}
+
 /// The value of `key` in the shipped operator example, when the example ships and sets it.
 fn example_value(key: &str) -> Option<String> {
     let example = std::fs::read_to_string(concat!(

@@ -25,6 +25,29 @@ pub struct Config {
     pub limits: Limits,
     /// Trusted Platform receipt and terminal-report configuration.
     pub receipt: ReceiptConfig,
+    /// Re-sending of deletion tombstones until Knowledge acknowledges them.
+    pub tombstone: TombstoneConfig,
+}
+
+/// How often a tombstone Knowledge has not acknowledged is published again (XR-021 CONTRACTS.md
+/// R5-11). The events stream collapses a repeated message id inside its 120 second duplicate
+/// window, so a resend sooner than that is a no-op at the broker.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TombstoneConfig {
+    /// Seconds a published tombstone waits for its acknowledgement, and the first wait between
+    /// two resends.
+    pub resend_after_seconds: u64,
+    /// The wait doubles after each resend up to this many seconds.
+    pub resend_cap_seconds: u64,
+}
+
+impl Default for TombstoneConfig {
+    fn default() -> Self {
+        Self {
+            resend_after_seconds: 600,
+            resend_cap_seconds: 21_600,
+        }
+    }
 }
 
 /// Private receipt integration configuration.
@@ -53,6 +76,12 @@ pub const DEFAULT_MAX_EVENT_BYTES: usize = 8_000_000;
 const MIN_EVENT_BYTES: usize = 65_536;
 /// The largest accepted [`ReceiptConfig::max_event_bytes`]: the 8 MiB broker payload limit.
 const MAX_EVENT_BYTES: usize = 8_388_608;
+/// The accepted range of [`TombstoneConfig::resend_after_seconds`]. The 30 second floor exists
+/// for tests; the events stream makes any resend inside its 120 second window a no-op.
+const MIN_RESEND_AFTER_SECONDS: u64 = 30;
+const MAX_RESEND_AFTER_SECONDS: u64 = 86_400;
+/// The largest accepted [`TombstoneConfig::resend_cap_seconds`]: seven days, the stream retention.
+const MAX_RESEND_CAP_SECONDS: u64 = 604_800;
 
 impl std::fmt::Debug for ReceiptConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -250,6 +279,16 @@ impl Config {
                 rule: "is required when the event bus URL is configured",
             });
         }
+        if config.tombstone.resend_cap_seconds < config.tombstone.resend_after_seconds
+            && !violations
+                .iter()
+                .any(|violation| violation.key.starts_with("RATATOSKR__TOMBSTONE__"))
+        {
+            violations.push(Violation {
+                key: "RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS".to_owned(),
+                rule: "must be at least RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS",
+            });
+        }
         if config.receipt.listen_address == config.admin.listen_address
             && !violations
                 .iter()
@@ -336,6 +375,20 @@ fn apply_entry(config: &mut Config, key: &str, value: &str, violations: &mut Vec
                 config.receipt.max_event_bytes = parsed;
             }
             _ => violations.push(refused("must be an integer from 65536 to 8388608")),
+        },
+        "RATATOSKR__TOMBSTONE__RESEND_AFTER_SECONDS" => match value.parse::<u64>() {
+            Ok(parsed)
+                if (MIN_RESEND_AFTER_SECONDS..=MAX_RESEND_AFTER_SECONDS).contains(&parsed) =>
+            {
+                config.tombstone.resend_after_seconds = parsed;
+            }
+            _ => violations.push(refused("must be an integer from 30 to 86400")),
+        },
+        "RATATOSKR__TOMBSTONE__RESEND_CAP_SECONDS" => match value.parse::<u64>() {
+            Ok(parsed) if parsed <= MAX_RESEND_CAP_SECONDS => {
+                config.tombstone.resend_cap_seconds = parsed;
+            }
+            _ => violations.push(refused("must be an integer of at most 604800")),
         },
         "RATATOSKR__RECEIPT__PLATFORM_ACCOUNTS" => match parse_platform_accounts(value) {
             Ok(accounts) => config.receipt.platform_accounts = accounts,
@@ -459,6 +512,7 @@ impl Default for Config {
                 event_bus_nkey_seed_path: None,
                 max_event_bytes: DEFAULT_MAX_EVENT_BYTES,
             },
+            tombstone: TombstoneConfig::default(),
         }
     }
 }
