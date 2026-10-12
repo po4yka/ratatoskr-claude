@@ -16,8 +16,8 @@ Documentation: no failing test can precede it.
 
 ## 3. Per-export versions of projects and conversations (R4-03 rules 1 and 2)
 
-- [ ] 3.1 RED: `crates/claude-archive/tests/privacy_deletion_survivor_content.rs::a_cumulative_series_records_each_exports_own_version` fails because the schema has neither the column nor the table.
-- [ ] 3.2 GREEN: `schema.sql`, `entity_versions.rs`, `Serialize` and `Deserialize` on the parsed types, digests and snapshots recorded by the import and by reparse, reparse comparing an export's own digest.
+- [x] 3.1 RED: `crates/claude-archive/tests/privacy_deletion_survivor_content.rs::a_cumulative_series_records_each_exports_own_version` fails because the schema has neither the column nor the table.
+- [x] 3.2 GREEN: `schema.sql`, `entity_versions.rs`, `Serialize` and `Deserialize` on the parsed types, digests and snapshots recorded by the import and by reparse, reparse comparing an export's own digest.
 
 ## 4. Deletion restores survivors (R4-03 rules 3 to 6)
 

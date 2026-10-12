@@ -17,6 +17,7 @@ pub mod completeness;
 pub mod config;
 mod contract_projection;
 pub mod database;
+mod entity_versions;
 pub mod events;
 pub mod export_projection;
 pub mod external_reference;

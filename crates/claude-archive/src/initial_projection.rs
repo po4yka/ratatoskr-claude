@@ -4,6 +4,7 @@
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::entity_versions::{self, ProjectVersion};
 use crate::reparse::{ReparseError, ReparsePlan, apply_conversations, decode_hex};
 use crate::{KnowledgeFileAvailability, ProjectKnowledgeFile, ProjectKnowledgeIngestResult};
 
@@ -82,13 +83,28 @@ pub(crate) async fn persist_initial_projection(
             .iter()
             .find(|instruction| instruction.project_external_id == project.external_id)
             .map(|instruction| instruction.text.as_str());
-        let project_id: Uuid = sqlx::query_scalar("insert into claude_archive.projects (project_id,account_id,external_project_id,title,description,instructions,parser_name,parser_version,upstream_state) values ($1,$2,$3,$4,$5,$6,$7,$8,'present') on conflict (account_id,external_project_id) do update set title=excluded.title,description=excluded.description,instructions=excluded.instructions,parser_name=excluded.parser_name,parser_version=excluded.parser_version,updated_at=now() returning project_id")
+        let version = ProjectVersion {
+            title: Some(project.name.clone()),
+            description: project.description.clone(),
+            instructions: instructions.map(str::to_owned),
+            parser_name: project.parser.parser_identifier.clone(),
+            parser_version: project.parser.parser_version.clone(),
+        };
+        let digest = version.digest();
+        let project_id: Uuid = sqlx::query_scalar("insert into claude_archive.projects (project_id,account_id,external_project_id,title,description,instructions,parser_name,parser_version,upstream_state,content_digest) values ($1,$2,$3,$4,$5,$6,$7,$8,'present',$9) on conflict (account_id,external_project_id) do update set title=excluded.title,description=excluded.description,instructions=excluded.instructions,parser_name=excluded.parser_name,parser_version=excluded.parser_version,content_digest=excluded.content_digest,updated_at=now() returning project_id")
             .bind(Uuid::now_v7()).bind(plan.tenant_id).bind(&project.external_id).bind(&project.name)
             .bind(&project.description).bind(instructions)
-            .bind(&project.parser.parser_identifier).bind(&project.parser.parser_version)
+            .bind(&project.parser.parser_identifier).bind(&project.parser.parser_version).bind(&digest)
             .fetch_one(&mut **tx).await?;
-        sqlx::query("insert into claude_archive.export_observations (export_id,subject_kind,subject_id) values ($1,'project',$2) on conflict do nothing")
-            .bind(plan.export_id).bind(project_id).execute(&mut **tx).await?;
+        entity_versions::present(
+            tx,
+            plan.export_id,
+            entity_versions::PROJECT,
+            project_id,
+            &digest,
+            serde_json::to_value(&version)?,
+        )
+        .await?;
         let files = plan
             .parsed
             .project_knowledge_files

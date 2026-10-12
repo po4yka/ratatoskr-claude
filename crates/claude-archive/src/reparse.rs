@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::contract_projection::{ImportProjection, ReportView};
+use crate::entity_versions::{self, conversation_digest};
 use ratatoskr_identifiers::WireTimestamp;
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
@@ -88,13 +89,13 @@ pub struct ReparsePlan {
     pub(crate) plan_fingerprint: Vec<u8>,
     pub(crate) evidence: Vec<u8>,
     pub(crate) parsed: ParsedExport,
-    pub(crate) current: BTreeMap<String, CurrentConversation>,
 }
 
+/// A conversation as one export presented it: the shared row and the digest of the version this
+/// export observed, which is not necessarily the content the row holds now.
 #[derive(Debug, Clone)]
 pub(crate) struct CurrentConversation {
-    id: Uuid,
-    title: String,
+    digest: Option<String>,
 }
 
 type ExportReplayRow = (Uuid, String, Vec<u8>, i64, String, String, String);
@@ -262,7 +263,6 @@ impl ReparseEngine {
             plan_fingerprint,
             evidence,
             parsed,
-            current,
         })
     }
 
@@ -392,19 +392,11 @@ pub(crate) async fn current_projection(
     pool: &PgPool,
     export_id: Uuid,
 ) -> Result<BTreeMap<String, CurrentConversation>, sqlx::Error> {
-    let rows: Vec<(Uuid,String,Option<String>)> = sqlx::query_as("select c.conversation_id,c.external_conversation_id,c.title from claude_archive.conversations c join claude_archive.export_observations o on o.subject_kind='conversation' and o.subject_id=c.conversation_id where o.export_id=$1 order by c.external_conversation_id")
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as("select c.external_conversation_id,o.content_digest from claude_archive.conversations c join claude_archive.export_observations o on o.subject_kind='conversation' and o.subject_id=c.conversation_id where o.export_id=$1 order by c.external_conversation_id")
         .bind(export_id).fetch_all(pool).await?;
     Ok(rows
         .into_iter()
-        .map(|(id, external, title)| {
-            (
-                external,
-                CurrentConversation {
-                    id,
-                    title: title.unwrap_or_default(),
-                },
-            )
-        })
+        .map(|(external, digest)| (external, CurrentConversation { digest }))
         .collect())
 }
 
@@ -426,7 +418,9 @@ pub(crate) fn compare(
     for (id, item) in &parsed_map {
         let kind = match current.get(id) {
             None => ReparseChangeKind::Added,
-            Some(old) if old.title == item.title => ReparseChangeKind::Unchanged,
+            Some(old) if old.digest.as_deref() == Some(conversation_digest(item).as_str()) => {
+                ReparseChangeKind::Unchanged
+            }
             Some(_) => ReparseChangeKind::Changed,
         };
         if matches!(kind, ReparseChangeKind::Added | ReparseChangeKind::Changed) {
@@ -473,6 +467,12 @@ pub(crate) async fn apply_conversations(
     plan: &ReparsePlan,
 ) -> Result<(), ReparseError> {
     for change in &plan.report.changes {
+        if !matches!(
+            change.kind,
+            ReparseChangeKind::Added | ReparseChangeKind::Changed
+        ) {
+            continue;
+        }
         let Some(parsed) = plan
             .parsed
             .conversations
@@ -481,50 +481,57 @@ pub(crate) async fn apply_conversations(
         else {
             continue;
         };
-        let subject_id = if let Some(current) = plan.current.get(&change.subject_id) {
-            current.id
-        } else {
-            let project_id: Option<Uuid> = match parsed.project_external_id.as_deref() {
-                Some(external) => sqlx::query_scalar("select project_id from claude_archive.projects where account_id=$1 and external_project_id=$2")
-                    .bind(plan.tenant_id).bind(external).fetch_optional(&mut **tx).await?,
-                None => None,
-            };
-            let created = parsed
-                .created_at
-                .as_deref()
-                .and_then(|value| WireTimestamp::parse(value).ok())
-                .map(|instant| instant.to_string());
-            let id: Uuid = sqlx::query_scalar("insert into claude_archive.conversations (conversation_id,account_id,external_conversation_id,project_id,title,upstream_state,provider_created_at,parser_name,parser_version) values ($1,$2,$3,$4,$5,'present',$6::timestamptz,$7,$8) on conflict (account_id,external_conversation_id) do update set last_seen_at=now() returning conversation_id")
-                .bind(Uuid::now_v7()).bind(plan.tenant_id).bind(&parsed.external_id).bind(project_id).bind(&parsed.title)
-                .bind(created).bind(&parsed.parser.parser_identifier).bind(&parsed.parser.parser_version)
-                .fetch_one(&mut **tx).await?;
-            sqlx::query("insert into claude_archive.export_observations (export_id,subject_kind,subject_id) values ($1,'conversation',$2) on conflict do nothing").bind(plan.export_id).bind(id).execute(&mut **tx).await?;
-            id
-        };
-        if change.kind == ReparseChangeKind::Changed {
-            sqlx::query("update claude_archive.conversations set title=$1,parser_name=$3,parser_version=$4,last_seen_at=now() where conversation_id=$2")
-                .bind(&parsed.title).bind(subject_id)
-                .bind(&parsed.parser.parser_identifier).bind(&parsed.parser.parser_version)
-                .execute(&mut **tx).await?;
-        }
-        if matches!(
-            change.kind,
-            ReparseChangeKind::Added | ReparseChangeKind::Changed
-        ) {
-            persist_messages(tx, plan.export_id, subject_id, parsed).await?;
-            let revision_index:i64=sqlx::query_scalar("select coalesce(max(revision_index),-1)+1 from claude_archive.revisions where subject_kind='conversation' and subject_id=$1").bind(subject_id).fetch_one(&mut **tx).await?;
-            let raw_record = serde_json::json!({"external_id":parsed.external_id,"title":parsed.title,"parser":plan.report.target_parser});
-            sqlx::query("insert into claude_archive.revisions (revision_id,subject_kind,subject_id,export_id,revision_index,raw_record) values ($1,'conversation',$2,$3,$4,$5)").bind(Uuid::now_v7()).bind(subject_id).bind(plan.export_id).bind(revision_index).bind(raw_record).execute(&mut **tx).await?;
-        }
+        let subject_id = write_conversation(tx, plan, parsed).await?;
+        persist_messages(tx, plan.export_id, subject_id, parsed).await?;
+        let revision_index:i64=sqlx::query_scalar("select coalesce(max(revision_index),-1)+1 from claude_archive.revisions where subject_kind='conversation' and subject_id=$1").bind(subject_id).fetch_one(&mut **tx).await?;
+        let raw_record = serde_json::json!({"external_id":parsed.external_id,"title":parsed.title,"parser":plan.report.target_parser});
+        sqlx::query("insert into claude_archive.revisions (revision_id,subject_kind,subject_id,export_id,revision_index,raw_record) values ($1,'conversation',$2,$3,$4,$5)").bind(Uuid::now_v7()).bind(subject_id).bind(plan.export_id).bind(revision_index).bind(raw_record).execute(&mut **tx).await?;
     }
     Ok(())
+}
+
+/// Writes the shared conversation row with the newest version and records the version this
+/// export presented (XR-021 CONTRACTS.md R4-03 rules 1 and 2).
+///
+/// The parser stamp changes with the content only, so a newer parser that reads identical content
+/// leaves the published content digest stable.
+async fn write_conversation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    plan: &ReparsePlan,
+    parsed: &crate::Conversation,
+) -> Result<Uuid, ReparseError> {
+    let project_id: Option<Uuid> = match parsed.project_external_id.as_deref() {
+        Some(external) => sqlx::query_scalar("select project_id from claude_archive.projects where account_id=$1 and external_project_id=$2")
+            .bind(plan.tenant_id).bind(external).fetch_optional(&mut **tx).await?,
+        None => None,
+    };
+    let created = parsed
+        .created_at
+        .as_deref()
+        .and_then(|value| WireTimestamp::parse(value).ok())
+        .map(|instant| instant.to_string());
+    let digest = conversation_digest(parsed);
+    let id: Uuid = sqlx::query_scalar("insert into claude_archive.conversations (conversation_id,account_id,external_conversation_id,project_id,title,upstream_state,provider_created_at,parser_name,parser_version,content_digest) values ($1,$2,$3,$4,$5,'present',$6::timestamptz,$7,$8,$9) on conflict (account_id,external_conversation_id) do update set title=excluded.title,project_id=excluded.project_id,provider_created_at=excluded.provider_created_at,parser_name=case when claude_archive.conversations.content_digest is distinct from excluded.content_digest then excluded.parser_name else claude_archive.conversations.parser_name end,parser_version=case when claude_archive.conversations.content_digest is distinct from excluded.content_digest then excluded.parser_version else claude_archive.conversations.parser_version end,content_digest=excluded.content_digest,last_seen_at=now() returning conversation_id")
+        .bind(Uuid::now_v7()).bind(plan.tenant_id).bind(&parsed.external_id).bind(project_id).bind(&parsed.title)
+        .bind(created).bind(&parsed.parser.parser_identifier).bind(&parsed.parser.parser_version).bind(&digest)
+        .fetch_one(&mut **tx).await?;
+    entity_versions::present(
+        tx,
+        plan.export_id,
+        entity_versions::CONVERSATION,
+        id,
+        &digest,
+        serde_json::to_value(parsed)?,
+    )
+    .await?;
+    Ok(id)
 }
 
 /// Persists the messages and parts of one parsed conversation and links each message to its parent.
 ///
 /// The first import and a reparse both call it, so a conversation announced downstream always has
 /// the messages the fact carries. Every write is an upsert keyed by the provider ids.
-async fn persist_messages(
+pub(crate) async fn persist_messages(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     export_id: Uuid,
     conversation_id: Uuid,
@@ -607,7 +614,7 @@ fn digest_current(
     digest_json(
         &value
             .iter()
-            .map(|(id, item)| (id, &item.title))
+            .map(|(id, item)| (id, &item.digest))
             .collect::<Vec<_>>(),
     )
 }

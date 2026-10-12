@@ -162,6 +162,7 @@ create table claude_archive.projects (
     parser_version        text,
     upstream_state        text        not null,
     local_backup_status   text        not null default 'reference_only',
+    content_digest        text,
     created_at            timestamptz not null default now(),
     updated_at            timestamptz not null default now(),
     constraint projects_parser_stamp_check
@@ -180,6 +181,9 @@ comment on column claude_archive.projects.instructions_blob_ref is
     'BlobStore reference of the project instructions when the source proved them, else null.';
 comment on column claude_archive.projects.local_backup_status is
     'Evidence-derived local preservation result, independent of authorization or connectivity.';
+comment on column claude_archive.projects.content_digest is
+    'Digest of the content the row holds now, the newest version imported. entity_versions keeps the '
+    'version each retained export presented (XR-021 CONTRACTS.md R4-03).';
 comment on column claude_archive.projects.parser_name is
     'Parser release that last wrote this row; null when the row did not come from a parser. A reparse that reads '
     'unchanged content leaves the stamp alone, so the published content digest stays stable.';
@@ -235,6 +239,7 @@ create table claude_archive.conversations (
     provider_created_at      timestamptz,
     parser_name              text,
     parser_version           text,
+    content_digest           text,
     first_seen_at            timestamptz not null default now(),
     last_seen_at             timestamptz not null default now(),
     constraint conversations_parser_stamp_check
@@ -251,6 +256,9 @@ comment on table claude_archive.conversations is
     'Conversation roots scoped to their account so provider ids stay distinct across accounts.';
 comment on column claude_archive.conversations.local_backup_status is
     'Evidence-derived local preservation result, independent of authorization or connectivity.';
+comment on column claude_archive.conversations.content_digest is
+    'Digest of the content the row holds now, the newest version imported. entity_versions keeps the '
+    'version each retained export presented (XR-021 CONTRACTS.md R4-03).';
 
 create index conversations_account_idx on claude_archive.conversations (account_id);
 
@@ -587,6 +595,7 @@ create table claude_archive.export_observations (
     subject_kind text        not null,
     subject_id   uuid        not null,
     observed_at  timestamptz not null default now(),
+    content_digest text,
     constraint export_observations_pkey primary key (export_id, subject_kind, subject_id),
     constraint export_observations_subject_kind_check
         check (subject_kind in ('project', 'project_source', 'conversation', 'message',
@@ -597,6 +606,29 @@ create table claude_archive.export_observations (
 
 comment on table claude_archive.export_observations is
     'Explicit raw-export provenance for every normalized subject observation.';
+comment on column claude_archive.export_observations.content_digest is
+    'The digest of the version of a project or conversation this export presented, naming a row of '
+    'entity_versions. Null for every other subject kind.';
+
+-- The content each export presented for a project or conversation, one row per distinct version.
+-- The shared row of the record holds only the newest version, so this is what a privacy deletion
+-- restores a record from when the export that wrote the newest version is deleted (XR-021
+-- CONTRACTS.md R4-03). A version lives exactly as long as some export names its digest; the
+-- deletion removes the rest, so no content of a deleted export survives here. There is no foreign
+-- key: entity_id names a project or a conversation by kind, and deletion removes the versions of
+-- records that no longer exist.
+create table claude_archive.entity_versions (
+    entity_kind    text        not null,
+    entity_id      uuid        not null,
+    content_digest text        not null,
+    snapshot       jsonb       not null,
+    recorded_at    timestamptz not null default now(),
+    constraint entity_versions_pkey primary key (entity_kind, entity_id, content_digest),
+    constraint entity_versions_kind_check check (entity_kind in ('project', 'conversation'))
+);
+
+comment on table claude_archive.entity_versions is
+    'One snapshot per distinct version of a project or conversation while some export names it.';
 
 create table claude_archive.extracted_artifacts (
     extracted_artifact_id uuid        primary key,

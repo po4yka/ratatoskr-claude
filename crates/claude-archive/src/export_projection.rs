@@ -1,6 +1,6 @@
 //! Conservative projection types for the documented synthetic consumer export.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::parser_registry::{ParserCapability, ParserDescriptor};
@@ -11,7 +11,7 @@ const PARSER_IDENTIFIER: &str = "claude-synthetic-consumer-export";
 const PARSER_VERSION: &str = "2026-08-27";
 
 /// Parser provenance carried by a normalized record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ParserStamp {
     /// Detected source schema identifier.
     pub schema_identifier: String,
@@ -22,7 +22,7 @@ pub struct ParserStamp {
 }
 
 /// A provider field that no current parser rule understands.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnknownField {
     /// JSON Pointer for the object containing the unrecognized field.
     pub location: String,
@@ -134,7 +134,7 @@ pub struct ArtifactVersion {
 }
 
 /// A normalized conversation observation.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Conversation {
     /// Provider conversation identifier.
     pub external_id: String,
@@ -153,7 +153,7 @@ pub struct Conversation {
 }
 
 /// A normalized message node.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     /// Provider message identifier.
     pub external_id: String,
@@ -174,7 +174,7 @@ pub struct Message {
 }
 
 /// An ordered normalized message content part.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContentPart {
     /// Plain text content.

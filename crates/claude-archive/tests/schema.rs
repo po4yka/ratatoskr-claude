@@ -18,7 +18,7 @@ use uuid::Uuid;
 use ratatoskr_claude_archive::test_support::TestDatabase;
 
 /// The tables the service owns, from the AGENTS.md conceptual data list.
-const OWNED_TABLES: [&str; 30] = [
+const OWNED_TABLES: [&str; 31] = [
     "accounts",
     "organizations",
     "exports",
@@ -39,6 +39,7 @@ const OWNED_TABLES: [&str; 30] = [
     "tombstones",
     "completeness_reports",
     "export_observations",
+    "entity_versions",
     "extracted_artifacts",
     "portable_exports",
     "privacy_deletion_requests",
@@ -93,7 +94,7 @@ async fn assert_lifecycle_columns(pool: &sqlx::PgPool) {
     for (relation, required_columns) in [
         (
             "export_observations",
-            &["export_id", "subject_kind", "subject_id"][..],
+            &["export_id", "subject_kind", "subject_id", "content_digest"][..],
         ),
         (
             "extracted_artifacts",

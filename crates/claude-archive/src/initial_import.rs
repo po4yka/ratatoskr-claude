@@ -267,7 +267,6 @@ impl InitialImportWorker {
                 plan_fingerprint: Vec::new(),
                 evidence,
                 parsed,
-                current,
             },
             evidence_ref,
             completeness,
