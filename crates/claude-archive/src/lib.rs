@@ -18,6 +18,7 @@ pub mod completeness;
 pub mod config;
 mod contract_projection;
 pub mod database;
+pub mod deletion_ack;
 mod entity_versions;
 pub mod events;
 pub mod export_projection;
@@ -72,7 +73,7 @@ pub use external_reference::{
 pub use import_state::{ImportError, ImportRunStore, ImportState, TransitionOutcome};
 pub use initial_import::InitialImportWorker;
 pub use knowledge_link::{KnowledgeLinkError, KnowledgeLinkOutcome, KnowledgeLinkStore};
-pub use operation_outbox::{OutboxError, OutboxPublisher};
+pub use operation_outbox::{OutboxError, OutboxPublisher, connect_event_bus};
 pub use parser_migration::{
     ParserMigrationEntry, ParserMigrationEntryStatus, ParserMigrationPlan, ParserMigrationReport,
     ParserMigrationStatus,

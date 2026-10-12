@@ -70,10 +70,47 @@ fn connect_options(seed: String, closed: Arc<AtomicBool>) -> async_nats::Connect
         })
 }
 
-/// The unpublished rows exist, by the same predicate as [`PENDING_SQL`].
-const HAS_PENDING_SQL: &str = "select exists (select 1 from claude_archive.outbox_events
+/// The published tombstones nobody acknowledged whose resend is due (XR-021 CONTRACTS.md R5-11).
+macro_rules! resend_predicate {
+    () => {
+        "event_type = 'ai_archive.subject.tombstoned.v1' and published_at is not null
+         and acknowledged_at is null and undeliverable_at is null and next_resend_at <= now()
+         and (next_attempt_at is null or next_attempt_at <= now())"
+    };
+}
+
+/// Opens the one authenticated connection a consumer of this service uses: nkey authentication
+/// from the seed file and the service's own inbox prefix, so the deployed ACL lets its replies
+/// through.
+///
+/// # Errors
+///
+/// [`OutboxError::Broker`] when the seed cannot be read or the broker refuses the connection, and
+/// [`OutboxError::BrokerTimeout`] when it does not answer in time.
+pub async fn connect_event_bus(
+    endpoint: &str,
+    nkey_seed_path: &std::path::Path,
+) -> Result<async_nats::Client, OutboxError> {
+    let seed = tokio::fs::read_to_string(nkey_seed_path)
+        .await
+        .map_err(OutboxError::broker)?;
+    let options = connect_options(seed.trim().to_owned(), Arc::new(AtomicBool::new(false)));
+    tokio::time::timeout(CONNECT_TIMEOUT, options.connect(endpoint))
+        .await
+        .map_err(|_| OutboxError::BrokerTimeout)?
+        .map_err(OutboxError::broker)
+}
+
+/// The unpublished rows or the due resends exist, by the same predicates as [`PENDING_SQL`] and
+/// [`RESEND_SQL`].
+const HAS_PENDING_SQL: &str = concat!(
+    "select exists (select 1 from claude_archive.outbox_events
      where published_at is null and undeliverable_at is null
-       and (next_attempt_at is null or next_attempt_at <= now()))";
+       and (next_attempt_at is null or next_attempt_at <= now()))
+     or exists (select 1 from claude_archive.outbox_events where ",
+    resend_predicate!(),
+    ")"
+);
 
 /// The broker connection a publisher keeps for its lifetime.
 #[derive(Debug)]
@@ -89,6 +126,13 @@ const PENDING_SQL: &str = "select event_id, event_type, envelope from claude_arc
        and (next_attempt_at is null or next_attempt_at <= now())
      order by occurred_at, event_id limit $1";
 
+/// The tombstones whose resend is due, oldest due first.
+const RESEND_SQL: &str = concat!(
+    "select event_id, event_type, envelope from claude_archive.outbox_events where ",
+    resend_predicate!(),
+    " order by next_resend_at, event_id limit $1"
+);
+
 /// The local outbox publisher for every archive event.
 ///
 /// Clones share one lazily created broker connection (XR-021 CONTRACTS.md R3-07 rule 1). A
@@ -97,6 +141,7 @@ const PENDING_SQL: &str = "select event_id, event_type, envelope from claude_arc
 #[derive(Debug, Clone)]
 pub struct OutboxPublisher {
     pool: sqlx::PgPool,
+    resend: crate::deletion_ack::ResendPolicy,
     connection: Arc<tokio::sync::Mutex<Option<HeldConnection>>>,
     failing: Arc<AtomicBool>,
 }
@@ -107,9 +152,30 @@ impl OutboxPublisher {
     pub fn new(pool: sqlx::PgPool) -> Self {
         Self {
             pool,
+            resend: crate::deletion_ack::ResendPolicy::default(),
             connection: Arc::new(tokio::sync::Mutex::new(None)),
             failing: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Sets how long a published tombstone waits for Knowledge's acknowledgement before the pump
+    /// publishes it again, and the longest wait between two resends (XR-021 CONTRACTS.md R5-11).
+    #[must_use]
+    pub const fn with_tombstone_resend(mut self, after: Duration, cap: Duration) -> Self {
+        self.resend = crate::deletion_ack::ResendPolicy { after, cap };
+        self
+    }
+
+    /// Exports the tombstone backlog as the two gauges of the operator listener (XR-021
+    /// CONTRACTS.md R5-11). It reads the table, never the broker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutboxError::Database`] when the outbox cannot be read.
+    pub async fn record_backlog(&self) -> Result<crate::deletion_ack::Backlog, OutboxError> {
+        crate::deletion_ack::record_backlog(&self.pool)
+            .await
+            .map_err(OutboxError::Database)
     }
 
     /// Whether the last pass that needed the broker succeeded.
@@ -245,11 +311,20 @@ impl OutboxPublisher {
         &self,
         jetstream: &async_nats::jetstream::Context,
     ) -> Result<usize, OutboxError> {
-        let rows = sqlx::query(PENDING_SQL)
+        let pending = sqlx::query(PENDING_SQL)
             .bind(BATCH_SIZE)
             .fetch_all(&self.pool)
             .await
             .map_err(OutboxError::Database)?;
+        let resends = sqlx::query(RESEND_SQL)
+            .bind(BATCH_SIZE)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(OutboxError::Database)?;
+        let rows = pending
+            .into_iter()
+            .map(|row| (row, false))
+            .chain(resends.into_iter().map(|row| (row, true)));
 
         // The server limit is read from the connection, never assumed: a body over it is refused
         // on every attempt, so it is a property of the row, not of the broker's mood.
@@ -260,7 +335,7 @@ impl OutboxPublisher {
             .saturating_sub(HEADER_HEADROOM_BYTES);
         let mut published = 0;
         let mut refused = 0_usize;
-        for row in rows {
+        for (row, resend) in rows {
             let event_id: Uuid = row.try_get("event_id").map_err(OutboxError::Database)?;
             let event_type: String = row.try_get("event_type").map_err(OutboxError::Database)?;
             let subject =
@@ -273,7 +348,14 @@ impl OutboxPublisher {
             }
             let body = serde_json::to_vec(&envelope).map_err(OutboxError::Encode)?;
             if body.len() > largest_body {
-                self.mark_undeliverable(event_id).await?;
+                if resend {
+                    // It fitted when it was first published, so the broker limit shrank. Treat it
+                    // as a refusal: the resend backs off instead of coming back every pass.
+                    self.record_refusal(event_id, PAYLOAD_TOO_LARGE).await?;
+                    refused += 1;
+                } else {
+                    self.mark_undeliverable(event_id).await?;
+                }
                 continue;
             }
             let mut headers = async_nats::HeaderMap::new();
@@ -287,7 +369,11 @@ impl OutboxPublisher {
             };
             match acknowledged {
                 Ok(()) => {
-                    self.mark_published(event_id).await?;
+                    if resend {
+                        self.mark_resent(event_id).await?;
+                    } else {
+                        self.mark_published(event_id).await?;
+                    }
                     published += 1;
                 }
                 Err(class) => {
@@ -324,12 +410,36 @@ impl OutboxPublisher {
         Ok(())
     }
 
+    /// Marks a row published after the broker acknowledged it. A tombstone is also scheduled for
+    /// its first resend, one interval later.
     async fn mark_published(&self, event_id: Uuid) -> Result<(), OutboxError> {
         sqlx::query(
-            "update claude_archive.outbox_events set published_at = now(), last_error = null
+            "update claude_archive.outbox_events
+             set published_at = now(), last_error = null,
+                 next_resend_at = case when event_type = 'ai_archive.subject.tombstoned.v1'
+                                       then now() + make_interval(secs => $2) end
              where event_id = $1 and published_at is null",
         )
         .bind(event_id)
+        .bind(self.resend.after.as_secs_f64())
+        .execute(&self.pool)
+        .await
+        .map_err(OutboxError::Database)?;
+        Ok(())
+    }
+
+    /// Counts a resend and schedules the next one, doubling the wait up to the cap.
+    async fn mark_resent(&self, event_id: Uuid) -> Result<(), OutboxError> {
+        sqlx::query(
+            "update claude_archive.outbox_events
+             set resend_count = resend_count + 1, last_error = null,
+                 next_resend_at = now() + least(make_interval(secs => $2) * power(2, resend_count),
+                                                make_interval(secs => $3))
+             where event_id = $1 and acknowledged_at is null",
+        )
+        .bind(event_id)
+        .bind(self.resend.after.as_secs_f64())
+        .bind(self.resend.cap.as_secs_f64())
         .execute(&self.pool)
         .await
         .map_err(OutboxError::Database)?;
@@ -344,7 +454,7 @@ impl OutboxPublisher {
              set attempt_count = attempt_count + 1, last_error = $2,
                  next_attempt_at = now()
                      + least(300, 2 * power(2, least(attempt_count, 7))) * interval '1 second'
-             where event_id = $1 and published_at is null",
+             where event_id = $1",
         )
         .bind(event_id)
         .bind(class)

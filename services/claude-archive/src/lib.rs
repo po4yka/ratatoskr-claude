@@ -37,6 +37,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio_util::io::SyncIoBridge;
 use uuid::Uuid;
 
+pub mod deletion_acks;
 mod fault;
 pub mod lifecycle_commands;
 pub mod operator_commands;
@@ -64,6 +65,7 @@ pub struct RuntimeState {
     database: AtomicU8,
     blob_store: AtomicU8,
     operation_report_publisher: AtomicU8,
+    deletion_ack_consumer: AtomicU8,
     initial_import_worker: AtomicU8,
 }
 
@@ -123,6 +125,16 @@ impl RuntimeState {
         );
     }
 
+    /// Records whether the consumer of Knowledge's deletion acknowledgements is attached to its
+    /// durable. Whether Knowledge answers is not part of it: a Knowledge outage must not make
+    /// this service unready (XR-021 CONTRACTS.md R5-11).
+    pub fn set_deletion_ack_consumer_ready(&self, ready: bool) {
+        self.deletion_ack_consumer.store(
+            if ready { COMPONENT_UP } else { COMPONENT_DOWN },
+            Ordering::Release,
+        );
+    }
+
     /// Records whether the restart-safe initial import loop completed its latest pass.
     pub fn set_initial_import_worker_ready(&self, ready: bool) {
         self.initial_import_worker.store(
@@ -145,6 +157,7 @@ impl RuntimeState {
             && dependencies_up(&self.database)
             && dependencies_up(&self.blob_store)
             && dependencies_up(&self.operation_report_publisher)
+            && dependencies_up(&self.deletion_ack_consumer)
             && dependencies_up(&self.initial_import_worker)
     }
 
@@ -178,6 +191,7 @@ impl RuntimeState {
                 &self.operation_report_publisher,
                 CheckName::OperationReportPublisher,
             ),
+            (&self.deletion_ack_consumer, CheckName::DeletionAckConsumer),
             (&self.initial_import_worker, CheckName::InitialImportWorker),
         ] {
             if probe.load(Ordering::Acquire) == COMPONENT_ABSENT {
@@ -226,6 +240,8 @@ pub enum CheckName {
     BlobStore,
     /// The database answers. Present only once one has been probed.
     Database,
+    /// The consumer of Knowledge's deletion acknowledgements is attached to its durable.
+    DeletionAckConsumer,
     /// No shutdown signal has arrived.
     Drain,
     /// The restart-safe initial import loop completed its latest bounded pass.

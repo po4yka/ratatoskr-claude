@@ -24,6 +24,7 @@ use ratatoskr_claude_archive::{
     Config, Database, InitialImportWorker, ParserRegistry, PlatformUsers,
 };
 use ratatoskr_claude_archive_service::RuntimeState;
+use ratatoskr_claude_archive_service::deletion_acks;
 use ratatoskr_claude_archive_service::lifecycle_commands::{
     LifecycleCommandResult, ParserMigrateExecution, PortableExportExecution,
     PrivacyDeleteExecuteExecution, PrivacyDeletePlanExecution, ReparseExecution,
@@ -42,6 +43,8 @@ const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// Terminal reports are retried gently; each pass has its own finite broker cap.
 const OPERATION_REPORT_INTERVAL: Duration = Duration::from_secs(2);
 const INITIAL_IMPORT_INTERVAL: Duration = Duration::from_millis(250);
+/// How long the acknowledgement consumer waits before it looks for its durable again.
+const DELETION_ACK_ATTACH_RETRY: Duration = Duration::from_secs(2);
 
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("check-config") {
@@ -257,17 +260,7 @@ async fn tokio_main() -> Result<(), ExitCode> {
 
     // The first probes happen before readiness flips, so the process never
     // reports itself ready over unverified dependencies.
-    let prober = spawn_probers(database.clone(), blob_store.clone(), Arc::clone(&runtime));
-    let (operation_reporter, reporter_stopped) =
-        start_operation_reporter(&config, &database, Arc::clone(&runtime)).unzip();
-    let initial_importer = start_initial_importer(
-        &database,
-        &blob_store,
-        &config.limits,
-        PlatformUsers::new(&config.receipt.platform_accounts),
-        config.receipt.max_event_bytes,
-        Arc::clone(&runtime),
-    )?;
+    let mut background = start_background(&config, &database, &blob_store, &runtime)?;
     runtime.mark_startup_complete();
     tracing::info!("startup complete");
 
@@ -285,16 +278,10 @@ async fn tokio_main() -> Result<(), ExitCode> {
             move || metrics_handle.render(),
             Duration::from_millis(config.limits.shutdown_timeout_ms),
         ) => result,
-        () = publisher_stopped(reporter_stopped) => {
-            Err("the archive event publisher stopped on a fatal error".to_owned())
-        }
+        stopped = background.stopped() => Err(stopped.to_owned()),
     };
 
-    prober.abort();
-    if let Some(reporter) = operation_reporter {
-        reporter.abort();
-    }
-    initial_importer.abort();
+    background.abort();
 
     match serve_result {
         Ok(()) => {
@@ -304,6 +291,74 @@ async fn tokio_main() -> Result<(), ExitCode> {
         Err(error) => {
             tracing::error!(%error, "a listener server failed");
             Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// The long-running tasks that end with the process, and the signals of the ones that must not.
+struct Background {
+    prober: tokio::task::JoinHandle<()>,
+    initial_importer: tokio::task::JoinHandle<()>,
+    operation_reporter: Option<tokio::task::JoinHandle<()>>,
+    reporter_stopped: Option<tokio::sync::oneshot::Receiver<()>>,
+    ack_consumer: Option<tokio::task::JoinHandle<()>>,
+    ack_consumer_stopped: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+fn start_background(
+    config: &Config,
+    database: &Database,
+    blob_store: &BlobStore,
+    runtime: &Arc<RuntimeState>,
+) -> Result<Background, ExitCode> {
+    let prober = spawn_probers(database.clone(), blob_store.clone(), Arc::clone(runtime));
+    let (operation_reporter, reporter_stopped) =
+        start_operation_reporter(config, database, Arc::clone(runtime)).unzip();
+    let (ack_consumer, ack_consumer_stopped) =
+        start_deletion_ack_consumer(config, database, Arc::clone(runtime)).unzip();
+    let initial_importer = start_initial_importer(
+        database,
+        blob_store,
+        &config.limits,
+        PlatformUsers::new(&config.receipt.platform_accounts),
+        config.receipt.max_event_bytes,
+        Arc::clone(runtime),
+    )?;
+    Ok(Background {
+        prober,
+        initial_importer,
+        operation_reporter,
+        reporter_stopped,
+        ack_consumer,
+        ack_consumer_stopped,
+    })
+}
+
+impl Background {
+    /// Resolves, naming the task, when one that must run until the process ends has stopped.
+    ///
+    /// A publisher that stopped on a fatal error never recovers by retrying, and a consumer that
+    /// lost its stream reads nothing more, so the process exits non-zero instead of serving as
+    /// ready while archive events pile up unpublished or acknowledgements go unread.
+    async fn stopped(&mut self) -> &'static str {
+        tokio::select! {
+            () = publisher_stopped(self.reporter_stopped.take()) => {
+                "the archive event publisher stopped on a fatal error"
+            }
+            () = publisher_stopped(self.ack_consumer_stopped.take()) => {
+                "the deletion acknowledgement consumer stopped"
+            }
+        }
+    }
+
+    fn abort(&self) {
+        self.prober.abort();
+        self.initial_importer.abort();
+        for task in [&self.operation_reporter, &self.ack_consumer]
+            .into_iter()
+            .flatten()
+        {
+            task.abort();
         }
     }
 }
@@ -358,6 +413,11 @@ fn spawn_operation_reporter(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
+            // The backlog gauges read the table, not the broker, so they move while Knowledge or
+            // the broker is away; they never decide readiness.
+            if outbox.record_backlog().await.is_err() {
+                tracing::warn!("the tombstone backlog could not be read");
+            }
             match outbox
                 .publish_pending_once(&endpoint, &nkey_seed_path)
                 .await
@@ -397,13 +457,77 @@ fn start_operation_reporter(
     runtime.set_operation_report_publisher_ready(false);
     let (stopped, stopped_receiver) = tokio::sync::oneshot::channel();
     let handle = spawn_operation_reporter(
-        OutboxPublisher::new(database.pool().clone()),
+        OutboxPublisher::new(database.pool().clone()).with_tombstone_resend(
+            Duration::from_secs(config.tombstone.resend_after_seconds),
+            Duration::from_secs(config.tombstone.resend_cap_seconds),
+        ),
         endpoint.expose_secret().to_owned(),
         nkey_seed_path.clone(),
         runtime,
         stopped,
     );
     Some((handle, stopped_receiver))
+}
+
+/// Attaches to the Edge-provisioned durable of Knowledge's deletion acknowledgements and consumes
+/// it until the process ends (XR-021 CONTRACTS.md R5-11).
+///
+/// Until the durable is found and matches its spec the consumer reports itself not attached and
+/// tries again, because Edge may start after this service. Once attached, the task ends only when
+/// its stream breaks; the process then exits non-zero instead of serving as ready while
+/// acknowledgements go unread (S02 rule 5).
+fn start_deletion_ack_consumer(
+    config: &Config,
+    database: &Database,
+    runtime: Arc<RuntimeState>,
+) -> Option<(
+    tokio::task::JoinHandle<()>,
+    tokio::sync::oneshot::Receiver<()>,
+)> {
+    let (endpoint, nkey_seed_path) = config
+        .receipt
+        .event_bus_url
+        .as_ref()
+        .zip(config.receipt.event_bus_nkey_seed_path.as_ref())?;
+    runtime.set_deletion_ack_consumer_ready(false);
+    let (stopped, stopped_receiver) = tokio::sync::oneshot::channel();
+    let endpoint = endpoint.expose_secret().to_owned();
+    let nkey_seed_path = nkey_seed_path.clone();
+    let pool = database.pool().clone();
+    let handle = tokio::spawn(async move {
+        let consumer = loop {
+            match attach_deletion_ack_consumer(&endpoint, &nkey_seed_path).await {
+                Ok(consumer) => break consumer,
+                Err(error) => {
+                    tracing::warn!(%error, "the deletion acknowledgement durable is not usable yet");
+                    tokio::time::sleep(DELETION_ACK_ATTACH_RETRY).await;
+                }
+            }
+        };
+        runtime.set_deletion_ack_consumer_ready(true);
+        let error = deletion_acks::consume_deletion_acks(&consumer, &pool, std::future::pending())
+            .await
+            .err();
+        runtime.set_deletion_ack_consumer_ready(false);
+        tracing::error!(
+            ?error,
+            "the deletion acknowledgement consumer cannot continue"
+        );
+        let _ignored = stopped.send(());
+    });
+    Some((handle, stopped_receiver))
+}
+
+async fn attach_deletion_ack_consumer(
+    endpoint: &str,
+    nkey_seed_path: &std::path::Path,
+) -> Result<deletion_acks::AckConsumer, String> {
+    let client = ratatoskr_claude_archive::connect_event_bus(endpoint, nkey_seed_path)
+        .await
+        .map_err(|error| error.to_string())?;
+    deletion_acks::attach(&async_nats::jetstream::new(client))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Resolves when the publisher task has ended; never resolves when none is configured.

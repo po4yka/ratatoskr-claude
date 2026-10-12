@@ -253,6 +253,44 @@ impl Broker {
         )
     }
 
+    /// Creates the events stream with a short duplicate window, and the Edge-provisioned durable
+    /// `durable` on `filter_subject` (Explicit acknowledgements, 30 s wait, unlimited deliveries),
+    /// as Edge does for a producer's fixed consumer.
+    ///
+    /// The short window lets a test see a second stream copy of a message that is published again
+    /// with the same `Nats-Msg-Id`; the 120 s window of the deployed stream would collapse it.
+    ///
+    /// # Errors
+    ///
+    /// When the setup user cannot connect or the stream or consumer cannot be created.
+    pub async fn provision_durable(
+        &self,
+        durable: &str,
+        filter_subject: &str,
+        duplicate_window: Duration,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let client = self.admin_client().await?;
+        let stream = async_nats::jetstream::new(client.clone())
+            .get_or_create_stream(async_nats::jetstream::stream::Config {
+                name: "ratatoskr_events".to_owned(),
+                subjects: vec!["evt.>".to_owned()],
+                duplicate_window,
+                ..Default::default()
+            })
+            .await?;
+        stream
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some(durable.to_owned()),
+                filter_subject: filter_subject.to_owned(),
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                ack_wait: Duration::from_secs(30),
+                ..Default::default()
+            })
+            .await?;
+        client.drain().await?;
+        Ok(())
+    }
+
     /// Creates the stream the archive facts are published into, as Edge does.
     ///
     /// # Errors

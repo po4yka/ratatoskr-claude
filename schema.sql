@@ -816,6 +816,12 @@ create table claude_archive.outbox_events (
     next_attempt_at timestamptz,
     last_error      text,
     undeliverable_at timestamptz,
+    acknowledged_at timestamptz,
+    ack_outcome     text,
+    resend_count    integer     not null default 0,
+    next_resend_at  timestamptz,
+    constraint outbox_events_ack_outcome_check
+        check (ack_outcome in ('applied', 'refused')),
     constraint outbox_events_event_type_check
         check (event_type in ('platform.operation.reported.v1',
                               'ai_archive.archive.imported.v1',
@@ -838,6 +844,14 @@ comment on table claude_archive.outbox_events is
 
 comment on column claude_archive.outbox_events.undeliverable_at is
     'Set when the stored envelope is larger than the connected broker accepts, so retrying can never help. The pump skips the row, records last_error = payload_too_large, and the row never makes readiness false.';
+
+comment on column claude_archive.outbox_events.next_resend_at is
+    'Only rows of ai_archive.subject.tombstoned.v1 use the four acknowledgement columns (XR-021 CONTRACTS.md R5-11). The pump publishes a published, unacknowledged tombstone again when this time has passed, and stops when acknowledged_at is set.';
+
+create index outbox_events_resend_idx
+    on claude_archive.outbox_events (next_resend_at)
+    where event_type = 'ai_archive.subject.tombstoned.v1' and published_at is not null
+      and acknowledged_at is null;
 
 create index outbox_events_unpublished_idx
     on claude_archive.outbox_events (next_attempt_at)

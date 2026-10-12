@@ -1694,17 +1694,23 @@ dependencies = [
 name = "ratatoskr-claude-archive-service"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "axum",
+ "futures-util",
  "http-body-util",
+ "metrics-exporter-prometheus",
  "ratatoskr-ai-archive-contracts",
  "ratatoskr-claude-archive",
  "ratatoskr-error-contracts",
+ "ratatoskr-event-envelope",
  "ratatoskr-identifiers",
+ "ratatoskr-operation-contracts",
  "secrecy",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tower",

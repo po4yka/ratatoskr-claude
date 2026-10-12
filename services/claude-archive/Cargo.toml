@@ -16,17 +16,22 @@ name = "ratatoskr-claude-archive"
 path = "src/main.rs"
 
 [dependencies]
+async-nats.workspace = true
 axum.workspace = true
+futures-util.workspace = true
 http-body-util.workspace = true
 ratatoskr-ai-archive-contracts.workspace = true
 ratatoskr-claude-archive.workspace = true
 ratatoskr-error-contracts.workspace = true
+ratatoskr-event-envelope.workspace = true
 ratatoskr-identifiers.workspace = true
+ratatoskr-operation-contracts.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tower.workspace = true
@@ -37,6 +42,7 @@ uuid.workspace = true
 # Self-package tests reach the disposable-database and scratch helpers.
 ratatoskr-claude-archive = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
+metrics-exporter-prometheus.workspace = true
 
 [lints]
 workspace = true
