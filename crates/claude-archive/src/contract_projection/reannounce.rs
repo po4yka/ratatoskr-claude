@@ -256,7 +256,9 @@ async fn projects(
 /// A conversation is announced again when its latest fact names a deleted archive, and also when
 /// that fact, under a retained archive, differs from the restored conversation: the content parts
 /// are an append-only history, so a fact built after the deleted export was imported can carry a
-/// part that only the deleted export wrote.
+/// part that only the deleted export wrote. The earlier facts are removed from this service's outbox;
+/// Knowledge replaces its own head only when the new fact's `observed_at` is later, which a fact
+/// under a retained archive's original `imported_at` is not (an open cross-repository gap).
 async fn conversations(
     transaction: &mut Transaction<'_, Postgres>,
     deletion: &Deletion<'_>,
