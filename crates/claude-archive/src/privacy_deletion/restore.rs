@@ -37,24 +37,24 @@ pub(super) async fn restore_retained_versions(
     request_id: Uuid,
     accounts: &[Uuid],
 ) -> Result<(), PrivacyDeletionExecutionError> {
-    // A record the deletion removed has no use for its versions.
+    // A record the deletion removed has no use for its versions. The request's own inventory names
+    // them, so no other tenant's version is read.
     sqlx::query(
         "delete from claude_archive.entity_versions v
-         where not exists (select 1 from claude_archive.projects p
-                           where v.entity_kind = 'project' and p.project_id = v.entity_id)
-           and not exists (select 1 from claude_archive.conversations c
-                           where v.entity_kind = 'conversation'
-                             and c.conversation_id = v.entity_id)",
+         using claude_archive.privacy_deletion_items i
+         where i.request_id = $1 and i.action = 'remove_record'
+           and i.item_kind = v.entity_kind and i.subject_id = v.entity_id::text",
     )
+    .bind(request_id)
     .execute(&mut **tx)
     .await?;
-    for id in stale(tx, PROJECT).await? {
+    for id in stale(tx, PROJECT, accounts).await? {
         let held = retained_versions(tx, PROJECT, id).await?;
         if let Some(newest) = held.last() {
             restore_project(tx, id, newest).await?;
         }
     }
-    let mut conversations = stale(tx, CONVERSATION).await?;
+    let mut conversations = stale(tx, CONVERSATION, accounts).await?;
     conversations.extend(survivors(tx, request_id).await?);
     conversations.sort_unstable();
     conversations.dedup();
@@ -64,20 +64,28 @@ pub(super) async fn restore_retained_versions(
     }
     sqlx::query(
         "delete from claude_archive.entity_versions v
-         where not exists (select 1 from claude_archive.export_observations o
+         where (exists (select 1 from claude_archive.projects p
+                        where v.entity_kind = 'project' and p.project_id = v.entity_id
+                          and p.account_id = any($1))
+                or exists (select 1 from claude_archive.conversations c
+                           where v.entity_kind = 'conversation' and c.conversation_id = v.entity_id
+                             and c.account_id = any($1)))
+           and not exists (select 1 from claude_archive.export_observations o
                            where o.subject_kind = v.entity_kind and o.subject_id = v.entity_id
                              and o.content_digest = v.content_digest)",
     )
+    .bind(accounts)
     .execute(&mut **tx)
     .await?;
     refresh_backup_status(tx, accounts).await?;
     Ok(())
 }
 
-/// The surviving records whose row holds content that no retained export presented, among those
-/// a retained export still observes. A record no retained export observes keeps whatever it
-/// holds: the scope removes it, or no export ever observed it.
-async fn stale(tx: &mut Tx<'_>, kind: &str) -> Result<Vec<Uuid>, sqlx::Error> {
+/// The surviving records of `accounts` whose row holds content that no retained export presented,
+/// among those a retained export still observes. A record no retained export observes keeps
+/// whatever it holds: the scope removes it, or no export ever observed it. Only the accounts the
+/// request owns (and locked) are read, so another tenant's row is never rewritten.
+async fn stale(tx: &mut Tx<'_>, kind: &str, accounts: &[Uuid]) -> Result<Vec<Uuid>, sqlx::Error> {
     let (table, key) = if kind == PROJECT {
         ("projects", "project_id")
     } else {
@@ -85,7 +93,7 @@ async fn stale(tx: &mut Tx<'_>, kind: &str) -> Result<Vec<Uuid>, sqlx::Error> {
     };
     sqlx::query_scalar(&format!(
         "select r.{key} from claude_archive.{table} r
-         where r.content_digest is not null
+         where r.account_id = any($2) and r.content_digest is not null
            and exists (select 1 from claude_archive.export_observations o
                        where o.subject_kind = $1 and o.subject_id = r.{key})
            and not exists (select 1 from claude_archive.export_observations o
@@ -94,6 +102,7 @@ async fn stale(tx: &mut Tx<'_>, kind: &str) -> Result<Vec<Uuid>, sqlx::Error> {
          order by r.{key}"
     ))
     .bind(kind)
+    .bind(accounts)
     .fetch_all(&mut **tx)
     .await
 }
