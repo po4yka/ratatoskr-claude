@@ -10,6 +10,7 @@
 use ratatoskr_identifiers::WireTimestamp;
 
 use super::*;
+use crate::announced_subjects;
 
 /// Every `(table, column)` foreign key into a deletion root that is not `ON DELETE CASCADE` and
 /// that deletion deals with itself, either by deleting the referencing rows with their parent or
@@ -111,7 +112,8 @@ impl PrivacyDeletionExecutor {
         }
 
         // Read before the observations go: a subject is tombstoned under the archive that saw it.
-        let subjects = super::tombstones::collect_subjects(&mut transaction, request_id).await?;
+        let super::tombstones::Tombstones { subjects, archives } =
+            super::tombstones::collect_subjects(&mut transaction, request_id, &accounts).await?;
         sqlx::query(
             "delete from claude_archive.export_observations
              where export_id::text in (
@@ -148,7 +150,7 @@ impl PrivacyDeletionExecutor {
         retain_blobs_still_referenced(&mut transaction, request_id).await?;
 
         let removed_at = WireTimestamp::now();
-        let archives = super::tombstones::deleted_archives(&subjects);
+        let tombstoned = super::tombstones::ledger_keys(&subjects);
         super::tombstones::enqueue_tombstones(
             &mut transaction,
             &request,
@@ -162,14 +164,18 @@ impl PrivacyDeletionExecutor {
         // still holds is announced again, after the tombstone.
         super::tombstones::reannounce_survivors(
             &mut transaction,
-            &request,
             request_id,
             &archives,
             removed_at,
         )
         .await?;
-        super::tombstones::purge_facts_of_deleted_archives(&mut transaction, &request, &archives)
-            .await?;
+        super::tombstones::purge_facts_of_deleted_archives(&mut transaction, &archives).await?;
+        // The tombstones carry the owners now, so the ledger rows of what they remove go with it.
+        announced_subjects::forget_subjects(&mut transaction, &tombstoned, &accounts).await?;
+        announced_subjects::forget_archives(&mut transaction, &archives).await?;
+        if tenant_scope {
+            announced_subjects::forget_accounts(&mut transaction, &accounts).await?;
+        }
         sqlx::query(
             "update claude_archive.privacy_deletion_requests
              set state = 'purging', error_code = null, evidence_blob_ref = $2,

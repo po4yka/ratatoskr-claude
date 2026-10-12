@@ -1,8 +1,8 @@
 //! Tenant-scoped privacy inventory planning.
 
 use super::planning_closure::add_dependent_closure;
-use super::tombstones::require_platform_owner;
 use super::*;
+use crate::announced_subjects;
 
 impl PrivacyDeletionPlanner {
     /// Creates a planner over the Claude Archive database.
@@ -31,8 +31,9 @@ impl PrivacyDeletionPlanner {
         }
 
         let mut items = enumerate_tenant(&mut transaction, request).await?;
-        add_dependent_closure(&mut transaction, &request.tenant_ref, &mut items).await?;
-        require_platform_owner(&request.tenant_ref, &items)?;
+        let owners =
+            announced_subjects::owners_of_accounts(&mut transaction, &[request.account_id]).await?;
+        add_dependent_closure(&mut transaction, &owners, &mut items).await?;
         items.sort_by(|left, right| {
             (left.kind, &left.subject_id, left.action).cmp(&(
                 right.kind,
@@ -87,8 +88,9 @@ impl PrivacyDeletionPlanner {
         .await?;
         add_export_rows(&mut transaction, &export_ids, &mut items).await?;
         add_observed_subjects(&mut transaction, &export_ids, &mut items).await?;
-        add_dependent_closure(&mut transaction, &request.tenant_ref, &mut items).await?;
-        require_platform_owner(&request.tenant_ref, &items)?;
+        let owners =
+            announced_subjects::owners_of_accounts(&mut transaction, &[request.account_id]).await?;
+        add_dependent_closure(&mut transaction, &owners, &mut items).await?;
         items.sort_by(|left, right| {
             (left.kind, &left.subject_id, left.action).cmp(&(
                 right.kind,
@@ -169,8 +171,9 @@ impl PrivacyDeletionPlanner {
         .await?;
         add_export_rows(&mut transaction, &export_ids, &mut items).await?;
         add_observed_subjects(&mut transaction, &export_ids, &mut items).await?;
-        add_dependent_closure(&mut transaction, &request.tenant_ref, &mut items).await?;
-        require_platform_owner(&request.tenant_ref, &items)?;
+        let owners =
+            announced_subjects::owners_of_accounts(&mut transaction, &[request.account_id]).await?;
+        add_dependent_closure(&mut transaction, &owners, &mut items).await?;
         items.sort_by(|left, right| {
             (left.kind, &left.subject_id, left.action).cmp(&(
                 right.kind,
@@ -388,14 +391,7 @@ async fn enumerate_tenant(
     .await?;
     add_export_rows(transaction, &export_ids, &mut inventory).await?;
     add_account_rows(transaction, request.account_id, &mut inventory).await?;
-    add_delivery_rows(
-        transaction,
-        &export_ids,
-        request.account_id,
-        &request.tenant_ref,
-        &mut inventory,
-    )
-    .await?;
+    add_delivery_rows(transaction, &export_ids, request.account_id, &mut inventory).await?;
     add_shared_blobs(transaction, request.account_id, &mut inventory).await?;
     Ok(inventory)
 }
@@ -596,9 +592,9 @@ async fn add_delivery_rows(
     transaction: &mut Transaction<'_, Postgres>,
     export_ids: &[Uuid],
     account_id: Uuid,
-    tenant_ref: &str,
     inventory: &mut Vec<DeletionInventoryItem>,
 ) -> Result<(), sqlx::Error> {
+    let owners = announced_subjects::owners_of_accounts(transaction, &[account_id]).await?;
     let export_id_strings: Vec<String> = export_ids.iter().map(Uuid::to_string).collect();
     let analysis_rows: Vec<Uuid> = sqlx::query_scalar(
         "select distinct l.completion_event_id
@@ -622,12 +618,12 @@ async fn add_delivery_rows(
 
     let outbox_rows: Vec<Uuid> = sqlx::query_scalar(
         "select event_id from claude_archive.outbox_events
-         where (tenant_ref = $1
+         where (tenant_ref = any($1)
                 and not (event_type = 'ai_archive.subject.tombstoned.v1' and published_at is null))
             or (aggregate_type = 'export' and aggregate_id = any($2))
          order by event_id",
     )
-    .bind(tenant_ref)
+    .bind(&owners)
     .bind(&export_id_strings)
     .fetch_all(&mut **transaction)
     .await?;

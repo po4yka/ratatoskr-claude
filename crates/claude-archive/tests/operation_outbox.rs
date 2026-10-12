@@ -481,6 +481,9 @@ async fn an_undeliverable_row_does_not_wedge_the_pump() {
 /// classifier against ever treating an outage as a property of the row.
 #[tokio::test]
 async fn transient_refusals_never_make_a_row_undeliverable() {
+    // The recovery below publishes through a healthy client, so the stream must exist whatever
+    // test ran first against this broker.
+    events_stream(&connect().await).await;
     let db = TestDatabase::create()
         .await
         .expect("a disposable database applies the definition");

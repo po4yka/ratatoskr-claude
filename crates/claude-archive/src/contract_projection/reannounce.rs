@@ -15,6 +15,7 @@ use super::loaders::{
     load_artifacts, load_conversations, load_projects,
 };
 use super::*;
+use crate::announced_subjects;
 use crate::{DigestAlgorithm, MediaType};
 
 /// The rows a deletion keeps because an export that stays observed them.
@@ -33,7 +34,6 @@ impl Survivors {
 
 /// The deletion whose survivors are announced again.
 pub(crate) struct Deletion<'a> {
-    pub(crate) owner: TenantRef,
     /// The archives the deletion tombstones.
     pub(crate) archives: &'a [Uuid],
     /// The instant of the archive tombstones; every fact is stamped after it.
@@ -43,16 +43,21 @@ pub(crate) struct Deletion<'a> {
 /// What a fact needs to name the retained export it is announced under.
 struct RetainedImport {
     archive_id: Uuid,
+    /// The Platform user the retained archive was announced under (XR-021 CONTRACTS.md R5-06
+    /// rule 3), read from the ledger and never from the configured mapping.
+    owner: TenantRef,
     source_export: ratatoskr_identifiers::BlobRef,
     imported_at: WireTimestamp,
 }
 
 impl RetainedImport {
+    /// The retained export a survivor is announced under, or `None` when its archive was never
+    /// announced: Knowledge holds nothing for it, so there is nothing to repair.
     async fn load(
         transaction: &mut Transaction<'_, Postgres>,
         export_id: Uuid,
         deletion: &Deletion<'_>,
-    ) -> Result<Self, ReparseError> {
+    ) -> Result<Option<Self>, ReparseError> {
         let (archive_id, hash, byte_size): (Uuid, String, i64) = sqlx::query_as(
             "select ai_archive_id, encode(archive_hash, 'hex'), byte_size
              from claude_archive.exports where export_id = $1",
@@ -60,6 +65,10 @@ impl RetainedImport {
         .bind(export_id)
         .fetch_one(&mut **transaction)
         .await?;
+        let Some(owner) = announced_subjects::owner_of_archive(transaction, archive_id).await?
+        else {
+            return Ok(None);
+        };
         let raw = BlobRef {
             owner_service: crate::blob_store::OWNER_SERVICE.to_owned(),
             algorithm: DigestAlgorithm::Sha256,
@@ -74,31 +83,31 @@ impl RetainedImport {
                and event_type = $3
              order by occurred_at, event_id limit 1",
         )
-        .bind(deletion.owner.to_string())
+        .bind(owner.to_string())
         .bind(AiArchiveId(archive_id).as_entity_ref().to_string())
         .bind(ARCHIVE_IMPORTED)
         .fetch_optional(&mut **transaction)
         .await?
         .flatten();
-        Ok(Self {
+        Ok(Some(Self {
             archive_id,
+            owner,
             source_export: contract_blob_ref(&raw)?,
             imported_at: announced
                 .and_then(|value| WireTimestamp::parse(&value).ok())
                 .unwrap_or(deletion.tombstoned_at),
-        })
+        }))
     }
 
     fn provenance(
         &self,
-        owner: TenantRef,
         provider: &AiProvider,
         stamp: (ParserName, ParserVersion),
     ) -> AiArchiveProvenance {
         AiArchiveProvenance {
             ai_archive_id: AiArchiveId(self.archive_id),
             provider: provider.clone(),
-            owner,
+            owner: self.owner,
             source_export: self.source_export.clone(),
             imported_at: self.imported_at,
             parser_name: stamp.0,
@@ -125,6 +134,7 @@ struct AnnouncedConversation {
 async fn announced_under_deleted(
     transaction: &mut Transaction<'_, Postgres>,
     deletion: &Deletion<'_>,
+    owner: TenantRef,
     aggregate_type: &str,
     aggregate_id: &str,
     event_types: [&str; 2],
@@ -132,7 +142,7 @@ async fn announced_under_deleted(
 ) -> Result<bool, ReparseError> {
     let latest = latest_envelope(
         transaction,
-        deletion.owner,
+        owner,
         aggregate_type,
         aggregate_id,
         event_types,
@@ -204,7 +214,7 @@ pub(crate) async fn reannounce(
         conversations(transaction, deletion, &provider, &survivors.conversations).await?;
     facts.extend(conversation_facts);
     facts.extend(artifacts(transaction, deletion, &provider, &survivors.artifacts).await?);
-    drop_stale_conversation_facts(transaction, deletion.owner, &stale).await?;
+    drop_stale_conversation_facts(transaction, &stale).await?;
     for (ordinal, fact) in facts.iter().enumerate() {
         let at = after(transaction, deletion.tombstoned_at, ordinal).await?;
         ArchiveOutbox::enqueue_again_in(transaction, fact, at).await?;
@@ -221,7 +231,9 @@ async fn projects(
     let mut facts = Vec::new();
     let mut omitted = Omitted::default();
     for (export_id, ids) in earliest_retained(transaction, "project", ids).await? {
-        let import = RetainedImport::load(transaction, export_id, deletion).await?;
+        let Some(import) = RetainedImport::load(transaction, export_id, deletion).await? else {
+            continue;
+        };
         let records =
             load_projects(transaction, export_id, provider, &mut omitted, Some(&ids)).await?;
         for record in records {
@@ -230,6 +242,7 @@ async fn projects(
             if announced_under_deleted(
                 transaction,
                 deletion,
+                import.owner,
                 "project",
                 &aggregate,
                 event_types,
@@ -239,7 +252,7 @@ async fn projects(
             {
                 let project = record.project;
                 facts.push(ArchiveEventFact::ProjectUpdated(AiProjectUpdated {
-                    import_provenance: import.provenance(deletion.owner, provider, record.stamp),
+                    import_provenance: import.provenance(provider, record.stamp),
                     content_digest: digest(&project)?,
                     project,
                     extensions: Extensions::new(),
@@ -256,24 +269,29 @@ async fn projects(
 /// A conversation is announced again when its latest fact names a deleted archive, and also when
 /// that fact, under a retained archive, differs from the restored conversation: the content parts
 /// are an append-only history, so a fact built after the deleted export was imported can carry a
-/// part that only the deleted export wrote. The earlier facts are removed from this service's outbox;
-/// Knowledge replaces its own head only when the new fact's `observed_at` is later, which a fact
-/// under a retained archive's original `imported_at` is not (an open cross-repository gap).
+/// part that only the deleted export wrote. The earlier facts are removed from this service's outbox.
+/// A fact under a retained archive carries that archive's original `imported_at`, the same instant
+/// as the head Knowledge holds; Knowledge replaces the head on an equal `observed_at` when the
+/// event id is later (XR-021 CONTRACTS.md R5-08 rule 2), and this fact's id is minted at deletion
+/// time. The rule is tested in Knowledge; no end-to-end proof is claimed here beyond the workspace
+/// F6 run.
 async fn conversations(
     transaction: &mut Transaction<'_, Postgres>,
     deletion: &Deletion<'_>,
     provider: &AiProvider,
     ids: &[Uuid],
-) -> Result<(Vec<ArchiveEventFact>, Vec<String>), ReparseError> {
+) -> Result<(Vec<ArchiveEventFact>, Vec<(TenantRef, String)>), ReparseError> {
     let mut facts = Vec::new();
-    let mut stale = Vec::new();
+    let mut stale: Vec<(TenantRef, String)> = Vec::new();
     let mut omitted = Omitted::default();
     for (export_id, ids) in earliest_retained(transaction, "conversation", ids).await? {
-        let import = RetainedImport::load(transaction, export_id, deletion).await?;
+        let Some(import) = RetainedImport::load(transaction, export_id, deletion).await? else {
+            continue;
+        };
         let records = load_conversations(
             transaction,
             export_id,
-            deletion.owner,
+            import.owner,
             provider,
             &mut omitted,
             Some(&ids),
@@ -283,7 +301,7 @@ async fn conversations(
             let aggregate = conversation.ai_conversation_id.as_entity_ref().to_string();
             let latest = latest_envelope(
                 transaction,
-                deletion.owner,
+                import.owner,
                 "conversation",
                 &aggregate,
                 [CONVERSATION_ADDED, CONVERSATION_UPDATED],
@@ -308,7 +326,7 @@ async fn conversations(
                 continue;
             }
             if outdated {
-                stale.push(aggregate);
+                stale.push((import.owner, aggregate));
             }
             let stamp = (
                 conversation.parser_name.clone(),
@@ -316,7 +334,7 @@ async fn conversations(
             );
             facts.push(ArchiveEventFact::ConversationUpdated(
                 AiConversationUpdated {
-                    import_provenance: import.provenance(deletion.owner, provider, stamp),
+                    import_provenance: import.provenance(provider, stamp),
                     conversation,
                     extensions: Extensions::new(),
                 },
@@ -330,22 +348,20 @@ async fn conversations(
 /// the restored conversation says; the fact announced again replaces them.
 async fn drop_stale_conversation_facts(
     transaction: &mut Transaction<'_, Postgres>,
-    owner: TenantRef,
-    aggregates: &[String],
+    stale: &[(TenantRef, String)],
 ) -> Result<(), ReparseError> {
-    if aggregates.is_empty() {
-        return Ok(());
+    for (owner, aggregate) in stale {
+        sqlx::query(
+            "delete from claude_archive.outbox_events
+             where tenant_ref = $1 and aggregate_type = 'conversation' and aggregate_id = $2
+               and event_type = any($3)",
+        )
+        .bind(owner.to_string())
+        .bind(aggregate)
+        .bind([CONVERSATION_ADDED, CONVERSATION_UPDATED].as_slice())
+        .execute(&mut **transaction)
+        .await?;
     }
-    sqlx::query(
-        "delete from claude_archive.outbox_events
-         where tenant_ref = $1 and aggregate_type = 'conversation' and aggregate_id = any($2)
-           and event_type = any($3)",
-    )
-    .bind(owner.to_string())
-    .bind(aggregates)
-    .bind([CONVERSATION_ADDED, CONVERSATION_UPDATED].as_slice())
-    .execute(&mut **transaction)
-    .await?;
     Ok(())
 }
 
@@ -358,11 +374,13 @@ async fn artifacts(
     let mut facts = Vec::new();
     let mut omitted = Omitted::default();
     for (export_id, ids) in earliest_retained(transaction, "artifact", ids).await? {
-        let import = RetainedImport::load(transaction, export_id, deletion).await?;
+        let Some(import) = RetainedImport::load(transaction, export_id, deletion).await? else {
+            continue;
+        };
         let records = load_artifacts(
             transaction,
             export_id,
-            deletion.owner,
+            import.owner,
             provider,
             &mut omitted,
             Some(&ids),
@@ -378,6 +396,7 @@ async fn artifacts(
             if announced_under_deleted(
                 transaction,
                 deletion,
+                import.owner,
                 "artifact",
                 &aggregate,
                 event_types,
@@ -386,11 +405,8 @@ async fn artifacts(
             .await?
             {
                 facts.push(ArchiveEventFact::ArtifactUpdated(AiArtifactUpdated {
-                    import_provenance: import.provenance(
-                        deletion.owner,
-                        provider,
-                        (record.parser_name, record.parser_version),
-                    ),
+                    import_provenance: import
+                        .provenance(provider, (record.parser_name, record.parser_version)),
                     artifact: record.artifact,
                     extensions: Extensions::new(),
                 }));

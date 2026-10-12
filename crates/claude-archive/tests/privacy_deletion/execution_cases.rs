@@ -175,17 +175,9 @@ async fn replay_effects(
     })
 }
 
-#[tokio::test]
-async fn completed_deletion_replay_returns_original_report() {
-    const ACCOUNT: &str = "a1000000-0000-0000-0000-000000000001";
-    const CONVERSATION: &str = "a3000000-0000-0000-0000-000000000001";
-    const REQUEST: &str = "a4000000-0000-0000-0000-000000000001";
-
-    let db = TestDatabase::create()
-        .await
-        .expect("the current schema provisions a disposable PostgreSQL database");
-    sqlx::raw_sql(
-        r"
+/// The minimal fixture of the replay test: one account, one export, one conversation and the
+/// ledger rows that name their owner.
+const REPLAY_SEED: &str = r"
         insert into claude_archive.accounts (account_id, external_account_id)
         values ('a1000000-0000-0000-0000-000000000001', 'replay-owner');
 
@@ -208,8 +200,28 @@ async fn completed_deletion_replay_returns_original_report() {
          (export_id, subject_kind, subject_id)
         values ('a2000000-0000-0000-0000-000000000001', 'conversation',
                 'a3000000-0000-0000-0000-000000000001');
-        ",
-    )
+
+        insert into claude_archive.announced_subjects
+         (subject_kind, subject_id, ai_archive_id, owner_ref, account_id)
+        values
+         ('archive', 'a2100000-0000-0000-0000-000000000001',
+          'a2100000-0000-0000-0000-000000000001',
+          'user:00000000-0000-7000-8000-000000000a05', 'a1000000-0000-0000-0000-000000000001'),
+         ('conversation', 'a3000000-0000-0000-0000-000000000001',
+          'a2100000-0000-0000-0000-000000000001',
+          'user:00000000-0000-7000-8000-000000000a05', 'a1000000-0000-0000-0000-000000000001');
+        ";
+
+#[tokio::test]
+async fn completed_deletion_replay_returns_original_report() {
+    const ACCOUNT: &str = "a1000000-0000-0000-0000-000000000001";
+    const CONVERSATION: &str = "a3000000-0000-0000-0000-000000000001";
+    const REQUEST: &str = "a4000000-0000-0000-0000-000000000001";
+
+    let db = TestDatabase::create()
+        .await
+        .expect("the current schema provisions a disposable PostgreSQL database");
+    sqlx::raw_sql(REPLAY_SEED)
     .execute(db.database.pool())
     .await
     .expect("minimal replay deletion fixture seeds");

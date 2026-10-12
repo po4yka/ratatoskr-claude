@@ -672,8 +672,8 @@ async fn a_part_only_the_deleted_export_appended_is_removed_even_when_the_row_is
     assert!(
         follow_up.contains(&"ai_archive.conversation.updated.v1".to_owned()),
         "the retained export's fact carried the deleted part, so this service announces the \
-         conversation again from the rebuilt rows (whether Knowledge replaces its own copy is an \
-         open cross-repository gap, not asserted here): {follow_up:?}"
+         conversation again from the rebuilt rows (whether Knowledge replaces its own copy is its \
+         rule, XR-021 CONTRACTS.md R5-08, tested there and not asserted here): {follow_up:?}"
     );
     assert_eq!(
         after.parts,

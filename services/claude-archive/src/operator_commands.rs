@@ -133,10 +133,10 @@ impl OperatorContext {
                 error_code: "not_found".to_owned(),
             };
         };
-        // A deletion is recorded under the Platform user when the account is mapped, because that
-        // reference names the owner of the tombstones it writes; an unmapped account keeps the
-        // supplied reference and is refused at planning if it has anything to tombstone.
-        let tenant_ref = self.deletion_tenant_ref(account_id, &command.tenant);
+        // A deletion is recorded under the reference its caller supplied. The owner of each
+        // tombstone is the one the subject was announced under, read from the ledger, so no part of
+        // a deletion consults the configured account mapping (XR-021 CONTRACTS.md R5-06).
+        let tenant_ref = command.tenant.clone();
         let request_id =
             match existing_request(self.database.pool(), &tenant_ref, &command.request_key).await {
                 Ok(Some(id)) => id,
@@ -200,13 +200,6 @@ impl OperatorContext {
         }
     }
 
-    /// The tenant reference a deletion of `account` is recorded under.
-    fn deletion_tenant_ref(&self, account: Uuid, supplied: &str) -> String {
-        self.platform_users
-            .tenant_ref_of(account)
-            .unwrap_or_else(|| supplied.to_owned())
-    }
-
     /// Physically erases exact unshared blobs and atomically finalizes deletion.
     pub async fn privacy_execute(
         &self,
@@ -218,11 +211,7 @@ impl OperatorContext {
         .bind(command.request_id)
         .fetch_optional(self.database.pool())
         .await;
-        let tenant_ref = Uuid::parse_str(&command.tenant).map_or_else(
-            |_| command.tenant.clone(),
-            |account| self.deletion_tenant_ref(account, &command.tenant),
-        );
-        if !matches!(owned,Ok(Some(ref tenant)) if tenant==&tenant_ref) {
+        if !matches!(owned, Ok(Some(ref tenant)) if tenant == &command.tenant) {
             return PrivacyDeleteExecuteExecution::Failed {
                 error_code: "not_found".to_owned(),
             };

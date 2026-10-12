@@ -58,7 +58,7 @@ impl Closure<'_> {
 /// removed message is a child, whatever conversation it belongs to.
 pub(super) async fn add_dependent_closure(
     transaction: &mut Transaction<'_, Postgres>,
-    tenant_ref: &str,
+    owners: &[String],
     items: &mut Vec<DeletionInventoryItem>,
 ) -> Result<(), sqlx::Error> {
     let seen = items
@@ -75,7 +75,7 @@ pub(super) async fn add_dependent_closure(
     add_message_children(transaction, &mut closure).await?;
     add_artifact_children(transaction, &mut closure).await?;
     add_blob_decisions(transaction, &mut closure).await?;
-    add_downstream(transaction, tenant_ref, &mut closure).await
+    add_downstream(transaction, owners, &mut closure).await
 }
 
 async fn ids(
@@ -402,7 +402,7 @@ async fn add_blob_decisions(
 /// removed conversations and Artifacts.
 async fn add_downstream(
     transaction: &mut Transaction<'_, Postgres>,
-    tenant_ref: &str,
+    owners: &[String],
     closure: &mut Closure<'_>,
 ) -> Result<(), sqlx::Error> {
     let conversations = closure.removed(DeletionItemKind::Conversation);
@@ -488,17 +488,16 @@ async fn add_downstream(
     aggregates.extend(archive_aggregates(&archives));
     let outbox: Vec<Uuid> = sqlx::query_scalar(
         "select event_id from claude_archive.outbox_events
-         where tenant_ref = $1 and aggregate_id = any($2)
+         where aggregate_id = any($1)
            and event_type <> 'ai_archive.subject.tombstoned.v1'
          order by event_id",
     )
-    .bind(tenant_ref)
     .bind(&aggregates)
     .fetch_all(&mut **transaction)
     .await?;
     for id in outbox
         .into_iter()
-        .chain(artifact_facts(transaction, tenant_ref, &artifacts).await?)
+        .chain(artifact_facts(transaction, owners, &artifacts).await?)
     {
         closure.remove(DeletionItemKind::Outbox, id, None);
     }
@@ -512,7 +511,7 @@ async fn add_downstream(
 /// whose `conversation_ref` and `project_ref` are those of a removed Artifact leave the outbox.
 async fn artifact_facts(
     transaction: &mut Transaction<'_, Postgres>,
-    tenant_ref: &str,
+    owners: &[String],
     artifacts: &[Uuid],
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     if artifacts.is_empty() {
@@ -523,7 +522,7 @@ async fn artifact_facts(
          from claude_archive.artifacts a
          left join claude_archive.messages m on m.message_id = a.message_id
          join claude_archive.outbox_events o
-           on o.tenant_ref = $1 and o.aggregate_type = 'artifact'
+           on o.tenant_ref = any($1) and o.aggregate_type = 'artifact'
           and o.aggregate_id = 'artifact:' || a.external_artifact_id
           and o.event_type <> 'ai_archive.subject.tombstoned.v1'
           and (o.envelope #>> '{payload,artifact,conversation_ref}') is not distinct from
@@ -533,7 +532,7 @@ async fn artifact_facts(
          where a.artifact_id = any($2)
          order by o.event_id",
     )
-    .bind(tenant_ref)
+    .bind(owners)
     .bind(artifacts)
     .fetch_all(&mut **transaction)
     .await

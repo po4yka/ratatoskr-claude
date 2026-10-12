@@ -1,7 +1,7 @@
 //! The owner of every announced subject is recorded with the fact that announces it (XR-021
 //! CONTRACTS.md R5-06 rule 1).
 //!
-//! Every test drives the real receipt, import and deletion path against a real PostgreSQL.
+//! Every test drives the real receipt, import and deletion path against a real `PostgreSQL`.
 //!
 //! Verified only against the documented synthetic export schema.
 

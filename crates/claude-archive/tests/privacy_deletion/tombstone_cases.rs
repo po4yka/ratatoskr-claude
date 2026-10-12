@@ -24,7 +24,11 @@ async fn seed_unlinked(pool: &sqlx::PgPool, raw: &closure_cases::Stored) {
           (project_id, account_id, external_project_id, upstream_state, local_backup_status)
          values ('{PROJECT}', '{ACCOUNT}', 'unlinked-project', 'present', 'reference_only');
          insert into claude_archive.export_observations (export_id, subject_kind, subject_id)
-         values ('{EXPORT}', 'project', '{PROJECT}');"
+         values ('{EXPORT}', 'project', '{PROJECT}');
+         insert into claude_archive.announced_subjects
+          (subject_kind, subject_id, ai_archive_id, owner_ref, account_id)
+         values ('project', '{PROJECT}', 'b2100000-0000-0000-0000-0000000000b1', '{TENANT}',
+                 '{ACCOUNT}');"
     ))
     .execute(pool)
     .await

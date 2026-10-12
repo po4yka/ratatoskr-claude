@@ -222,9 +222,6 @@ pub enum PrivacyDeletionExecutionError {
     /// Durable inventory names a blob the caller did not resolve exactly.
     #[error("privacy deletion blob inventory is unresolved")]
     UnresolvedBlob,
-    /// A request that must tombstone carries a tenant reference that is not a Platform user.
-    #[error("privacy deletion tenant reference is not a Platform user")]
-    InvalidTenant,
     /// A tombstone envelope could not be built or stored.
     #[error("privacy deletion tombstone could not be recorded")]
     Tombstone(#[from] crate::ArchiveEventError),

@@ -64,8 +64,14 @@ async fn seed_account(
     .execute(pool)
     .await
     .expect("the export seeds");
+    let owner = if letter == "a" { TENANT_A } else { TENANT_B };
     sqlx::raw_sql(&format!(
-        "insert into claude_archive.projects
+        "insert into claude_archive.announced_subjects
+          (subject_kind, subject_id, ai_archive_id, owner_ref, account_id)
+         values ('archive', '{archive}', '{archive}', '{owner}', '{account}'),
+                ('project', '{project}', '{archive}', '{owner}', '{account}'),
+                ('artifact', '{ARTIFACT_PROVIDER_ID}', '{archive}', '{owner}', '{account}');
+         insert into claude_archive.projects
           (project_id, account_id, external_project_id, upstream_state, local_backup_status)
          values ('{project}', '{account}', 'project-{letter}', 'present', 'reference_only');
          insert into claude_archive.artifacts
@@ -359,6 +365,12 @@ async fn seed_same_id_artifacts(
         "c5800000-0000-0000-0000-0000000000d2",
         CONVERSATION_TWO,
         "d2",
+    ));
+    statements.push(format!(
+        "insert into claude_archive.announced_subjects
+          (subject_kind, subject_id, ai_archive_id, owner_ref, account_id)
+         values ('artifact', '{ARTIFACT_PROVIDER_ID}', 'c2100000-0000-0000-0000-0000000000d1',
+                 '{TENANT_A}', '{ACCOUNT_A}')"
     ));
     sqlx::raw_sql(&statements.join(";\n"))
         .execute(pool)

@@ -173,6 +173,17 @@ insert into claude_archive.inbox_events
 values ('knowledge-analysis-completed', '57000000-0000-0000-0000-000000000001',
         '2026-01-02T00:00:00Z', 'processed');
 
+insert into claude_archive.announced_subjects
+ (subject_kind, subject_id, ai_archive_id, owner_ref, account_id)
+values
+ ('archive', '11000000-0000-0000-0000-000000000001', '11000000-0000-0000-0000-000000000001',
+  'user:00000000-0000-7000-8000-000000000a00', '10000000-0000-0000-0000-000000000001'),
+ ('conversation', '40000000-0000-0000-0000-000000000001',
+  '11000000-0000-0000-0000-000000000001',
+  'user:00000000-0000-7000-8000-000000000a00', '10000000-0000-0000-0000-000000000001'),
+ ('project', '30000000-0000-0000-0000-000000000001', '11000000-0000-0000-0000-000000000001',
+  'user:00000000-0000-7000-8000-000000000a00', '10000000-0000-0000-0000-000000000001');
+
 insert into claude_archive.outbox_events
  (event_id, event_type, aggregate_type, aggregate_id, envelope, payload_digest,
   correlation_id, tenant_ref, occurred_at)

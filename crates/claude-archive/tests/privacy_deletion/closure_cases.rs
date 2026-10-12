@@ -86,7 +86,15 @@ pub(super) async fn seed_linked_conversation(pool: &PgPool, raw: &Stored) {
           (completion_event_id, ai_archive_id, subject_kind, subject_id, content_digest_hex,
            completed_at)
          values ('b5700000-0000-0000-0000-0000000000b1', 'b2100000-0000-0000-0000-0000000000b1',
-                 'conversation', 'b4000000-0000-0000-0000-0000000000b1', repeat('44', 32), now());",
+                 'conversation', 'b4000000-0000-0000-0000-0000000000b1', repeat('44', 32), now());
+         insert into claude_archive.announced_subjects
+          (subject_kind, subject_id, ai_archive_id, owner_ref, account_id)
+         values ('archive', 'b2100000-0000-0000-0000-0000000000b1',
+                 'b2100000-0000-0000-0000-0000000000b1',
+                 'user:00000000-0000-7000-8000-000000000b01', 'b1000000-0000-0000-0000-0000000000b1'),
+                ('conversation', 'b4000000-0000-0000-0000-0000000000b1',
+                 'b2100000-0000-0000-0000-0000000000b1',
+                 'user:00000000-0000-7000-8000-000000000b01', 'b1000000-0000-0000-0000-0000000000b1');",
         pool,
     )
     .await;
@@ -270,57 +278,56 @@ async fn privacy_tombstone_does_not_abort_when_provider_tombstone_exists() {
     );
 }
 
+/// The owner of a tombstone is the one the subject was announced under (XR-021 CONTRACTS.md
+/// R5-06), so the reference the request is recorded under never decides it and a free-form one is
+/// planned like any other.
 #[tokio::test]
-async fn non_user_tenant_ref_is_rejected_at_planning_when_tombstones_exist() {
+async fn a_free_form_tenant_reference_is_planned_and_tombstones_go_to_the_ledger_owner() {
     let root = temp_root("closure-tenant-ref");
     let store = BlobStore::open(&root).expect("the blob store opens");
     let raw = store_bytes(&store, "application/zip", b"closure tenant archive");
     let db = TestDatabase::create().await.expect("a disposable database");
     seed_linked_conversation(db.database.pool(), &raw).await;
-    sqlx::query(
-        "insert into claude_archive.accounts (account_id, external_account_id)
-         values ('b1000000-0000-0000-0000-0000000000b2', 'closure-empty')",
-    )
-    .execute(db.database.pool())
-    .await
-    .expect("the empty account seeds");
-    let planner = PrivacyDeletionPlanner::new(db.database.pool().clone());
-
-    let rejected = planner
+    let request = Uuid::parse_str("b6000000-0000-0000-0000-0000000000b3").expect("UUID");
+    let planned = PrivacyDeletionPlanner::new(db.database.pool().clone())
         .plan_raw_export(&RawExportDeletionPlanRequest {
             tenant_ref: "tenant:not-a-user".to_owned(),
             account_id: Uuid::parse_str(ACCOUNT).expect("account UUID"),
-            request_id: Uuid::parse_str("b6000000-0000-0000-0000-0000000000b3").expect("UUID"),
-            request_key: "rejected".to_owned(),
-            correlation_id: "privacy-delete:rejected".to_owned(),
+            request_id: request,
+            request_key: "free-form".to_owned(),
+            correlation_id: "privacy-delete:free-form".to_owned(),
             export_id: Uuid::parse_str(EXPORT).expect("export UUID"),
         })
         .await;
-    let persisted: i64 =
-        sqlx::query_scalar("select count(*) from claude_archive.privacy_deletion_requests")
-            .fetch_one(db.database.pool())
+    let recorded: Vec<String> =
+        sqlx::query_scalar("select tenant_ref from claude_archive.privacy_deletion_requests")
+            .fetch_all(db.database.pool())
             .await
-            .expect("the request count is readable");
-    let without_tombstones = planner
-        .plan_tenant(&TenantDeletionPlanRequest {
-            tenant_ref: "tenant:not-a-user".to_owned(),
-            account_id: Uuid::parse_str("b1000000-0000-0000-0000-0000000000b2").expect("UUID"),
-            request_id: Uuid::parse_str("b6000000-0000-0000-0000-0000000000b4").expect("UUID"),
-            request_key: "accepted".to_owned(),
-            correlation_id: "privacy-delete:accepted".to_owned(),
-        })
+            .expect("the request is readable");
+    let outcome = PrivacyDeletionExecutor::new(db.database.pool().clone())
+        .finalize_with_blob_store(request, &store, &resolved(&[&raw]), None)
         .await;
+    let owners: Vec<String> = tombstone_envelopes(db.database.pool())
+        .await
+        .iter()
+        .map(|envelope| {
+            envelope
+                .payload_as::<AiArchiveTombstone>()
+                .expect("the payload is a tombstone")
+                .owner
+                .to_string()
+        })
+        .collect();
     db.cleanup().await.expect("cleanup succeeds");
     remove(&root);
 
-    assert!(
-        matches!(rejected, Err(PrivacyDeletionError::Conflict)),
-        "a deletion that must tombstone needs a Platform user tenant reference: {rejected:?}"
-    );
-    assert_eq!(persisted, 0, "a rejected plan persists nothing");
-    assert!(
-        without_tombstones.is_ok(),
-        "a scope with no tombstone subjects needs no user reference: {without_tombstones:?}"
+    planned.expect("a free-form tenant reference is planned");
+    outcome.expect("and executed");
+    assert_eq!(recorded, vec!["tenant:not-a-user".to_owned()]);
+    assert_eq!(
+        owners,
+        vec![TENANT.to_owned(), TENANT.to_owned()],
+        "the archive and the conversation are tombstoned to the owner the ledger holds"
     );
 }
 

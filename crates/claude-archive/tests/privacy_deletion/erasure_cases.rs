@@ -434,6 +434,15 @@ async fn tenant_deletion_retains_only_content_free_audit() {
          (consumer_name, event_id, consumed_at, handler_outcome)
         values ('private-inbox-consumer', 'c6000000-0000-0000-0000-000000000001',
                 now(), 'processed');
+        insert into claude_archive.announced_subjects
+         (subject_kind, subject_id, ai_archive_id, owner_ref, account_id)
+        values
+         ('archive', 'c2100000-0000-0000-0000-000000000001',
+          'c2100000-0000-0000-0000-000000000001',
+          'user:00000000-0000-7000-8000-000000000a07', 'c1000000-0000-0000-0000-000000000001'),
+         ('conversation', 'c4000000-0000-0000-0000-000000000001',
+          'c2100000-0000-0000-0000-000000000001',
+          'user:00000000-0000-7000-8000-000000000a07', 'c1000000-0000-0000-0000-000000000001');
         insert into claude_archive.outbox_events
          (event_id, event_type, aggregate_type, aggregate_id, envelope,
           payload_digest, correlation_id, tenant_ref, occurred_at)

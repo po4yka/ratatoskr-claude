@@ -187,7 +187,7 @@ impl ReparseEngine {
         archive_id: Uuid,
         target: ParserIdentity,
     ) -> Result<ReparsePlan, ReparseError> {
-        if privacy_blocked(&self.pool, tenant_id, &self.platform_users).await? {
+        if privacy_blocked(&self.pool, tenant_id).await? {
             return Err(ReparseError::Conflict);
         }
         let row: Option<ExportReplayRow> = sqlx::query_as(
@@ -274,7 +274,7 @@ impl ReparseEngine {
         if let Some(report) = prior_report(&self.pool, plan).await? {
             return Ok(report);
         }
-        if privacy_blocked(&self.pool, plan.tenant_id, &self.platform_users).await?
+        if privacy_blocked(&self.pool, plan.tenant_id).await?
             || digest_current(&current_projection(&self.pool, plan.export_id).await?)?
                 != plan.projection_fingerprint
         {
@@ -352,17 +352,11 @@ impl ReparseEngine {
     }
 }
 
-/// Whether an unfinished deletion holds this account. A deletion is keyed by the Platform user
-/// reference when its account is mapped and by the account id otherwise, so both are checked.
-async fn privacy_blocked(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    users: &PlatformUsers,
-) -> Result<bool, sqlx::Error> {
-    let mut references = vec![tenant_id.to_string()];
-    references.extend(users.tenant_ref_of(tenant_id));
-    sqlx::query_scalar("select exists(select 1 from claude_archive.privacy_deletion_requests where tenant_ref=any($1) and state<>'completed')")
-        .bind(references).fetch_one(pool).await
+/// Whether an unfinished deletion holds this account. A deletion is recorded under the account
+/// reference its caller supplied, which is the archive account id (XR-021 CONTRACTS.md R5-06).
+async fn privacy_blocked(pool: &PgPool, tenant_id: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("select exists(select 1 from claude_archive.privacy_deletion_requests where tenant_ref=$1 and state<>'completed')")
+        .bind(tenant_id.to_string()).fetch_one(pool).await
 }
 
 pub(crate) fn read_parser_evidence(

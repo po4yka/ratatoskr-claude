@@ -1,8 +1,10 @@
 //! Contract tombstones for user-requested deletion.
 //!
 //! One `ai_archive.subject.tombstoned.v1` envelope per deleted archive, per deleted conversation
-//! and project, and per Knowledge-linked Artifact, owned by the Platform user and pointing at a
-//! content-free evidence blob (XR-021 CONTRACTS.md S07).
+//! and project, and per Knowledge-linked Artifact, for every Platform user the subject was
+//! announced to, pointing at a content-free evidence blob (XR-021 CONTRACTS.md S07 and R5-06). The
+//! owners come from the ledger of announcements; no part of a deletion reads the configured
+//! account mapping.
 
 use ratatoskr_ai_archive_contracts::{
     AiArchiveTombstone, AiArchiveTombstoneReason, AiArchiveTombstoneSubject, AiProvider,
@@ -12,43 +14,54 @@ use ratatoskr_identifiers::{
     WireTimestamp,
 };
 
+use std::collections::HashMap;
+
 use super::*;
+use crate::announced_subjects;
 use crate::contract_projection::{Deletion, Survivors, reannounce};
 use crate::{ArchiveEventError, ArchiveOutbox};
 
-/// One subject that needs a downstream tombstone, read before its rows are deleted.
+/// One subject that needs a downstream tombstone for one owner, read before its rows are deleted.
 pub(super) struct TombstoneSubject {
     ai_archive_id: Uuid,
     subject: AiArchiveTombstoneSubject,
+    owner: TenantRef,
 }
 
-/// The archives a set of tombstone subjects deletes.
-pub(super) fn deleted_archives(subjects: &[TombstoneSubject]) -> Vec<Uuid> {
-    subjects
-        .iter()
-        .filter(|subject| matches!(subject.subject, AiArchiveTombstoneSubject::Archive))
-        .map(|subject| subject.ai_archive_id)
-        .collect()
-}
-
-/// Rejects a plan that must tombstone but whose tenant reference is not a Platform user.
-///
-/// The owner of a tombstone is the Platform tenant `user:<uuid>`, which Knowledge indexes under.
-/// A free-form reference cannot name it, so the request is refused before anything persists.
-pub(super) fn require_platform_owner(
-    tenant_ref: &str,
-    items: &[DeletionInventoryItem],
-) -> Result<(), PrivacyDeletionError> {
-    let needs_owner = items.iter().any(|item| {
-        matches!(
-            item.kind,
-            DeletionItemKind::RawArchive | DeletionItemKind::DownstreamTombstone
-        )
-    });
-    if needs_owner && TenantRef::parse(tenant_ref).is_err() {
-        return Err(PrivacyDeletionError::Conflict);
+impl TombstoneSubject {
+    /// The ledger key of the subject, which a deletion removes with its tombstones.
+    fn ledger_key(&self) -> (String, String) {
+        match &self.subject {
+            AiArchiveTombstoneSubject::Archive => {
+                ("archive".to_owned(), self.ai_archive_id.to_string())
+            }
+            AiArchiveTombstoneSubject::Conversation { ai_conversation_id } => {
+                ("conversation".to_owned(), ai_conversation_id.0.to_string())
+            }
+            AiArchiveTombstoneSubject::Project { ai_project_id } => {
+                ("project".to_owned(), ai_project_id.0.to_string())
+            }
+            AiArchiveTombstoneSubject::Artifact {
+                external_artifact_id,
+            } => ("artifact".to_owned(), external_artifact_id.to_string()),
+        }
     }
-    Ok(())
+}
+
+/// The ledger keys of the subjects a deletion tombstones.
+pub(super) fn ledger_keys(subjects: &[TombstoneSubject]) -> Vec<(String, String)> {
+    let mut keys: Vec<(String, String)> =
+        subjects.iter().map(TombstoneSubject::ledger_key).collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// What a request tombstones: the subjects, and every archive it deletes whether or not that
+/// archive was ever announced.
+pub(super) struct Tombstones {
+    pub(super) subjects: Vec<TombstoneSubject>,
+    pub(super) archives: Vec<Uuid>,
 }
 
 /// Reads the tombstone subjects of a request while their rows and observations still exist.
@@ -56,12 +69,16 @@ pub(super) fn require_platform_owner(
 /// The subjects are the deleted raw archives, every conversation and project the request removes,
 /// and the Knowledge-linked Artifacts (XR-021 CONTRACTS.md S07). A conversation or project is
 /// tombstoned whether or not Knowledge analysed it: its facts announced it, so its removal must be
-/// announced too. It is tombstoned under the earliest deleted archive that observed it, which is
-/// the archive its first fact carried.
+/// announced too. Each subject yields one entry per owner the ledger holds for it among the
+/// request's accounts (R5-06 rule 2), and a subject the ledger does not know was never announced
+/// and yields none. For one owner the subject is tombstoned under the earliest deleted archive
+/// that observed it and was announced to that owner, else the earliest deleted archive that
+/// observed it.
 pub(super) async fn collect_subjects(
     transaction: &mut Transaction<'_, Postgres>,
     request_id: Uuid,
-) -> Result<Vec<TombstoneSubject>, sqlx::Error> {
+    accounts: &[Uuid],
+) -> Result<Tombstones, sqlx::Error> {
     let archives: Vec<Uuid> = sqlx::query_scalar(
         "select distinct e.ai_archive_id from claude_archive.exports e
          join claude_archive.privacy_deletion_items i
@@ -71,16 +88,102 @@ pub(super) async fn collect_subjects(
     .bind(request_id)
     .fetch_all(&mut **transaction)
     .await?;
-    let removed: Vec<(String, String, Option<Uuid>)> = sqlx::query_as(
+    let mut archive_owners: HashMap<Uuid, Vec<TenantRef>> = HashMap::new();
+    let mut subjects = Vec::new();
+    for ai_archive_id in &archives {
+        let owners = announced_subjects::owners_of_subject(
+            transaction,
+            "archive",
+            &ai_archive_id.to_string(),
+            accounts,
+        )
+        .await?;
+        for owner in &owners {
+            subjects.push(TombstoneSubject {
+                ai_archive_id: *ai_archive_id,
+                subject: AiArchiveTombstoneSubject::Archive,
+                owner: *owner,
+            });
+        }
+        archive_owners.insert(*ai_archive_id, owners);
+    }
+    let first_archive = archives.first().copied();
+    for (kind, subject_id, observers) in removed_subjects(transaction, request_id).await? {
+        let Ok(id) = Uuid::parse_str(&subject_id) else {
+            continue;
+        };
+        let (ledger_kind, subject) = match kind.as_str() {
+            "conversation" => (
+                "conversation",
+                AiArchiveTombstoneSubject::Conversation {
+                    ai_conversation_id: AiConversationId(id),
+                },
+            ),
+            _ => (
+                "project",
+                AiArchiveTombstoneSubject::Project {
+                    ai_project_id: AiProjectId(id),
+                },
+            ),
+        };
+        for owner in
+            announced_subjects::owners_of_subject(transaction, ledger_kind, &subject_id, accounts)
+                .await?
+        {
+            let announced_to_owner = observers.iter().copied().find(|archive| {
+                archive_owners
+                    .get(archive)
+                    .is_some_and(|owners| owners.contains(&owner))
+            });
+            let Some(ai_archive_id) = announced_to_owner
+                .or_else(|| observers.first().copied())
+                .or(first_archive)
+            else {
+                continue;
+            };
+            subjects.push(TombstoneSubject {
+                ai_archive_id,
+                subject: subject.clone(),
+                owner,
+            });
+        }
+    }
+    for (ai_archive_id, subject_id) in linked_artifacts(transaction, request_id, &archives).await? {
+        let Ok(external) = EntityLocalId::parse(&subject_id) else {
+            continue;
+        };
+        for owner in
+            announced_subjects::owners_of_subject(transaction, "artifact", &subject_id, accounts)
+                .await?
+        {
+            subjects.push(TombstoneSubject {
+                ai_archive_id,
+                subject: AiArchiveTombstoneSubject::Artifact {
+                    external_artifact_id: external.clone(),
+                },
+                owner,
+            });
+        }
+    }
+    Ok(Tombstones { subjects, archives })
+}
+
+/// Every conversation and project the request removes, with the archives it deletes that
+/// observed them, oldest export first.
+async fn removed_subjects(
+    transaction: &mut Transaction<'_, Postgres>,
+    request_id: Uuid,
+) -> Result<Vec<(String, String, Vec<Uuid>)>, sqlx::Error> {
+    sqlx::query_as(
         "select r.item_kind, r.subject_id,
-                (select e.ai_archive_id
-                 from claude_archive.export_observations o
-                 join claude_archive.exports e on e.export_id = o.export_id
-                 join claude_archive.privacy_deletion_items x
-                   on x.request_id = r.request_id and x.item_kind = 'raw_archive'
-                  and x.subject_id = e.export_id::text
-                 where o.subject_kind = r.item_kind and o.subject_id::text = r.subject_id
-                 order by e.export_id limit 1)
+                array(select e.ai_archive_id
+                      from claude_archive.export_observations o
+                      join claude_archive.exports e on e.export_id = o.export_id
+                      join claude_archive.privacy_deletion_items x
+                        on x.request_id = r.request_id and x.item_kind = 'raw_archive'
+                       and x.subject_id = e.export_id::text
+                      where o.subject_kind = r.item_kind and o.subject_id::text = r.subject_id
+                      order by e.export_id)
          from claude_archive.privacy_deletion_items r
          join claude_archive.privacy_deletion_items t
            on t.request_id = r.request_id and t.item_kind = 'downstream_tombstone'
@@ -92,8 +195,16 @@ pub(super) async fn collect_subjects(
     )
     .bind(request_id)
     .fetch_all(&mut **transaction)
-    .await?;
-    let linked: Vec<(Uuid, String)> = sqlx::query_as(
+    .await
+}
+
+/// The Knowledge-linked Artifacts of the request, with the archive their link names.
+async fn linked_artifacts(
+    transaction: &mut Transaction<'_, Postgres>,
+    request_id: Uuid,
+    archives: &[Uuid],
+) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
+    sqlx::query_as(
         "select distinct l.ai_archive_id, l.subject_id
          from claude_archive.knowledge_analysis_links l
          join claude_archive.privacy_deletion_items i
@@ -103,48 +214,9 @@ pub(super) async fn collect_subjects(
            and l.ai_archive_id = any($2) order by 1, 2",
     )
     .bind(request_id)
-    .bind(&archives)
+    .bind(archives)
     .fetch_all(&mut **transaction)
-    .await?;
-    let first_archive = archives.first().copied();
-    let mut subjects: Vec<TombstoneSubject> = archives
-        .into_iter()
-        .map(|ai_archive_id| TombstoneSubject {
-            ai_archive_id,
-            subject: AiArchiveTombstoneSubject::Archive,
-        })
-        .collect();
-    for (kind, subject_id, observed_in) in removed {
-        let Some(ai_archive_id) = observed_in.or(first_archive) else {
-            continue;
-        };
-        let Ok(id) = Uuid::parse_str(&subject_id) else {
-            continue;
-        };
-        let subject = match kind.as_str() {
-            "conversation" => AiArchiveTombstoneSubject::Conversation {
-                ai_conversation_id: AiConversationId(id),
-            },
-            _ => AiArchiveTombstoneSubject::Project {
-                ai_project_id: AiProjectId(id),
-            },
-        };
-        subjects.push(TombstoneSubject {
-            ai_archive_id,
-            subject,
-        });
-    }
-    for (ai_archive_id, subject_id) in linked {
-        if let Ok(external) = EntityLocalId::parse(&subject_id) {
-            subjects.push(TombstoneSubject {
-                ai_archive_id,
-                subject: AiArchiveTombstoneSubject::Artifact {
-                    external_artifact_id: external,
-                },
-            });
-        }
-    }
-    Ok(subjects)
+    .await
 }
 
 /// Inserts one tombstone envelope per subject, in the row-removal transaction.
@@ -163,8 +235,6 @@ pub(super) async fn enqueue_tombstones(
     if subjects.is_empty() {
         return Ok(0);
     }
-    let owner = TenantRef::parse(&request.tenant_ref)
-        .map_err(|_| PrivacyDeletionExecutionError::InvalidTenant)?;
     let evidence_ref = crate::events::contract_blob_ref(evidence)?;
     let correlation = EntityRef::parse(&request.correlation_id)
         .or_else(|_| EntityRef::parse(&format!("privacy_request:{request_id}")))
@@ -177,7 +247,7 @@ pub(super) async fn enqueue_tombstones(
         let tombstone = AiArchiveTombstone {
             ai_archive_id: AiArchiveId(subject.ai_archive_id),
             provider: provider.clone(),
-            owner,
+            owner: subject.owner,
             subject: subject.subject,
             reason: reason.clone(),
             evidence_ref: evidence_ref.clone(),
@@ -206,17 +276,14 @@ pub(super) async fn enqueue_tombstones(
 /// Their facts were announced under an archive this request tombstones, and Knowledge drops
 /// everything announced under a tombstoned archive. The survivors are the request's
 /// `retain_evidenced` items; the facts are enqueued in the row-removal transaction, so the
-/// tombstone and the repair commit together (XR-021 CONTRACTS.md S07).
+/// tombstone and the repair commit together (XR-021 CONTRACTS.md S07). Each survivor is announced
+/// to the owner of the retained archive it is announced under (R5-06 rule 3).
 pub(super) async fn reannounce_survivors(
     transaction: &mut Transaction<'_, Postgres>,
-    request: &super::rows::DurableDeletionRequest,
     request_id: Uuid,
     archives: &[Uuid],
     tombstoned_at: WireTimestamp,
 ) -> Result<usize, PrivacyDeletionExecutionError> {
-    let Ok(owner) = TenantRef::parse(&request.tenant_ref) else {
-        return Ok(0);
-    };
     if archives.is_empty() {
         return Ok(0);
     }
@@ -241,7 +308,6 @@ pub(super) async fn reannounce_survivors(
         }
     }
     let deletion = Deletion {
-        owner,
         archives,
         tombstoned_at,
     };
@@ -257,7 +323,6 @@ pub(super) async fn reannounce_survivors(
 /// stay, and the facts of subjects the request removes already left with their rows.
 pub(super) async fn purge_facts_of_deleted_archives(
     transaction: &mut Transaction<'_, Postgres>,
-    request: &super::rows::DurableDeletionRequest,
     archives: &[Uuid],
 ) -> Result<u64, PrivacyDeletionExecutionError> {
     if archives.is_empty() {
@@ -266,11 +331,10 @@ pub(super) async fn purge_facts_of_deleted_archives(
     let archives: Vec<String> = archives.iter().map(Uuid::to_string).collect();
     let removed = sqlx::query(
         "delete from claude_archive.outbox_events
-         where tenant_ref = $1 and event_type like 'ai_archive.%'
+         where event_type like 'ai_archive.%'
            and event_type <> 'ai_archive.subject.tombstoned.v1'
-           and (envelope #>> '{payload,import_provenance,ai_archive_id}') = any($2)",
+           and (envelope #>> '{payload,import_provenance,ai_archive_id}') = any($1)",
     )
-    .bind(&request.tenant_ref)
     .bind(&archives)
     .execute(&mut **transaction)
     .await?;
