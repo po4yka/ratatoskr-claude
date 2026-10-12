@@ -28,7 +28,7 @@ Documentation: no failing test can precede it.
 
 Documentation: no failing test can precede it.
 
-- [ ] 5.1 `DEVELOPMENT.md` plan item 5 and the `README.md` import description say that the import ingests knowledge files and a deletion restores survivors.
+- [x] 5.1 `DEVELOPMENT.md` plan item 5 and the `README.md` import description say that the import ingests knowledge files and a deletion restores survivors.
 
 ## 6. Gate
 
