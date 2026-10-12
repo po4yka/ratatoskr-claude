@@ -855,6 +855,30 @@ create unique index outbox_privacy_tombstone_once
     on claude_archive.outbox_events (event_type, aggregate_id, tenant_ref)
     where event_type = 'ai_archive.subject.tombstoned.v1';
 
+-- The owner every subject was announced under (XR-021 CONTRACTS.md R5-06). A row is written in the
+-- transaction that enqueues each ai_archive fact, so a deletion addresses a tombstone to the owner
+-- Knowledge holds the subject under without reading the configured account mapping. There is no
+-- foreign key: no export or account deletion cascades it, and a deletion removes its rows itself.
+create table claude_archive.announced_subjects (
+    subject_kind  text        not null,
+    subject_id    text        not null,
+    ai_archive_id uuid        not null,
+    owner_ref     text        not null,
+    account_id    uuid,
+    announced_at  timestamptz not null default now(),
+    constraint announced_subjects_pkey primary key (subject_kind, subject_id, owner_ref),
+    constraint announced_subjects_kind_check
+        check (subject_kind in ('archive', 'conversation', 'project', 'artifact')),
+    constraint announced_subjects_owner_check
+        check (owner_ref ~ '^user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+);
+
+comment on table claude_archive.announced_subjects is
+    'The Platform user each archive, project, conversation and Artifact was announced under. account_id is the archive account of the announcing export, null when no export row exists.';
+
+create index announced_subjects_account_idx on claude_archive.announced_subjects (account_id);
+create index announced_subjects_archive_idx on claude_archive.announced_subjects (ai_archive_id);
+
 -- Knowledge-derived interpretations remain links, never replacements for archive evidence.
 create table claude_archive.knowledge_analysis_links (
     completion_event_id uuid primary key,

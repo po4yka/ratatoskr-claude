@@ -9,6 +9,7 @@
 //! Knowledge evidence, completeness reporting, contract-native outbox publication,
 //! and revision-specific Knowledge analysis linkage are implemented.
 
+mod announced_subjects;
 pub mod archive_inspection;
 pub mod artifact;
 pub mod blob_protocol;

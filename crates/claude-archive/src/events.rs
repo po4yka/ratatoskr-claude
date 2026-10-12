@@ -32,6 +32,15 @@ pub enum ArchiveEventFact {
     Tombstoned(AiArchiveTombstone),
 }
 
+/// The subject a fact announces, the owner it announces it to and the archive it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Announcement {
+    pub(crate) subject_kind: &'static str,
+    pub(crate) subject_id: String,
+    pub(crate) owner: TenantRef,
+    pub(crate) ai_archive_id: uuid::Uuid,
+}
+
 /// A complete, durable event ready for at-least-once delivery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutboxEvent {
@@ -221,6 +230,7 @@ impl<'a> ArchiveOutbox<'a> {
         .bind(occurred_at.to_string())
         .fetch_optional(&mut **transaction)
         .await?;
+        crate::announced_subjects::record(transaction, fact).await?;
         let envelope = match stored {
             Some(_) => envelope,
             None => sqlx::query_scalar(
@@ -367,14 +377,39 @@ impl ArchiveEventFact {
 
     fn aggregate(&self) -> Result<(&'static str, String), ArchiveEventError> {
         let (reference, _) = self.aggregate_reference()?;
-        let kind = match self {
+        Ok((self.aggregate_kind(), reference.to_string()))
+    }
+
+    const fn aggregate_kind(&self) -> &'static str {
+        match self {
             Self::Imported(_) => "archive",
             Self::ConversationAdded(_) | Self::ConversationUpdated(_) => "conversation",
             Self::ProjectAdded(_) | Self::ProjectUpdated(_) => "project",
             Self::ArtifactAdded(_) | Self::ArtifactUpdated(_) => "artifact",
             Self::Tombstoned(_) => "tombstone",
+        }
+    }
+
+    /// The subject this fact announces and the owner and archive it announces it under, or `None`
+    /// for a tombstone, which announces nothing (XR-021 CONTRACTS.md R5-06 rule 1).
+    pub(crate) fn announcement(&self) -> Result<Option<Announcement>, ArchiveEventError> {
+        let archive = match self {
+            Self::Imported(value) => value.ai_archive_id.0,
+            Self::ConversationAdded(value) => value.import_provenance.ai_archive_id.0,
+            Self::ConversationUpdated(value) => value.import_provenance.ai_archive_id.0,
+            Self::ProjectAdded(value) => value.import_provenance.ai_archive_id.0,
+            Self::ProjectUpdated(value) => value.import_provenance.ai_archive_id.0,
+            Self::ArtifactAdded(value) => value.import_provenance.ai_archive_id.0,
+            Self::ArtifactUpdated(value) => value.import_provenance.ai_archive_id.0,
+            Self::Tombstoned(_) => return Ok(None),
         };
-        Ok((kind, reference.to_string()))
+        let (reference, owner) = self.aggregate_reference()?;
+        Ok(Some(Announcement {
+            subject_kind: self.aggregate_kind(),
+            subject_id: reference.local_id().to_string(),
+            owner,
+            ai_archive_id: archive,
+        }))
     }
 
     fn aggregate_reference(&self) -> Result<(EntityRef, TenantRef), ArchiveEventError> {
