@@ -56,6 +56,35 @@ pub(crate) fn zip_of(export: &serde_json::Value) -> Vec<u8> {
     writer.finish().expect("the archive closes").into_inner()
 }
 
+/// A new archive account.
+pub(crate) async fn add_account(db: &TestDatabase) -> Uuid {
+    let account = Uuid::now_v7();
+    sqlx::query(
+        "insert into claude_archive.accounts (account_id, external_account_id) values ($1, $2)",
+    )
+    .bind(account)
+    .bind(format!("series-{account}"))
+    .execute(db.database.pool())
+    .await
+    .expect("the account inserts");
+    account
+}
+
+/// An import worker over the series' database and blob store.
+pub(crate) fn worker_over(
+    db: &TestDatabase,
+    store: &BlobStore,
+    users: PlatformUsers,
+) -> InitialImportWorker {
+    InitialImportWorker::new(
+        db.database.pool().clone(),
+        store.clone(),
+        Arc::new(ParserRegistry::runtime().expect("the runtime registry is valid")),
+        limits(),
+        users,
+    )
+}
+
 /// One account whose exports are received in order and imported by the real worker.
 pub(crate) struct Series {
     pub(crate) db: TestDatabase,
@@ -71,26 +100,11 @@ impl Series {
         let db = TestDatabase::create()
             .await
             .expect("a disposable database applies the definition");
-        let account = Uuid::now_v7();
-        sqlx::query(
-            "insert into claude_archive.accounts (account_id, external_account_id)
-             values ($1, $2)",
-        )
-        .bind(account)
-        .bind(format!("series-{account}"))
-        .execute(db.database.pool())
-        .await
-        .expect("the account inserts");
+        let account = add_account(&db).await;
         let root = temp_root(label);
         let store = BlobStore::open(&root).expect("the blob store opens");
         let users = PlatformUsers::new(&[(Uuid::parse_str(USER).expect("user UUID"), account)]);
-        let worker = InitialImportWorker::new(
-            db.database.pool().clone(),
-            store.clone(),
-            Arc::new(ParserRegistry::runtime().expect("the runtime registry is valid")),
-            limits(),
-            users,
-        );
+        let worker = worker_over(&db, &store, users);
         Self {
             db,
             store,
@@ -104,15 +118,21 @@ impl Series {
         self.db.database.pool()
     }
 
-    /// Receives `export` as a new archive and returns its operation id without importing it.
+    /// Receives `export` as a new archive of this series' account and returns its operation id
+    /// without importing it.
     pub(crate) async fn receive(&self, export: &serde_json::Value) -> Uuid {
+        self.receive_as(self.account, export).await
+    }
+
+    /// Receives `export` as a new archive of `account`.
+    pub(crate) async fn receive_as(&self, account: Uuid, export: &serde_json::Value) -> Uuid {
         let archive = zip_of(export);
         let operation_id = Uuid::now_v7();
         ratatoskr_claude_archive::receipt::receive_platform_operation_archive(
             &self.db.database,
             &self.store,
             &TenantClaim {
-                account: Some(self.account),
+                account: Some(account),
                 organization: None,
             },
             AcquisitionMode::ConsumerExport,

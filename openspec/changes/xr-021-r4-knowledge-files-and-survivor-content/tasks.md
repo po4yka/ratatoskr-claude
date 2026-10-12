@@ -11,8 +11,8 @@ Documentation: no failing test can precede it.
 
 ## 2. The knowledge blobs follow the registration protocol (R4-02 rule 3)
 
-- [ ] 2.1 RED: `tests/knowledge_file_import.rs::an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_leave_a_dangling_row` fails because the import transaction references a blob nobody registered.
-- [ ] 2.2 GREEN: `register_blobs` lists the knowledge blobs and stages their bytes.
+- [x] 2.1 RED: `tests/knowledge_file_import.rs::an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_leave_a_dangling_row` fails because the import transaction references a blob nobody registered.
+- [x] 2.2 GREEN: `register_blobs` lists the knowledge blobs and stages their bytes.
 
 ## 3. Per-export versions of projects and conversations (R4-03 rules 1 and 2)
 

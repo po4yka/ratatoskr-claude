@@ -1,4 +1,5 @@
-//! Persistence of the reconciled Artifacts of an initial import.
+//! Persistence of the reconciled Artifacts of an initial import, and the registration of every blob
+//! the import is about to reference.
 //!
 //! Artifacts are first-class rows with immutable version chains. Each Artifact and version is
 //! recorded as observed by the import's raw export, which is what lets scoped privacy deletion and
@@ -10,12 +11,12 @@ use uuid::Uuid;
 use crate::artifact::{ArtifactVersionAvailability, ReconciledArtifact};
 use crate::initial_import::PreparedInitialImport;
 use crate::reparse::{ReparseError, ReparsePlan, decode_hex};
-use crate::{BlobRef, BlobStore};
+use crate::{BlobRef, BlobStore, KnowledgeFileAvailability};
 
 /// Takes the digest locks of every blob the import is about to reference and checks each is still
-/// stored (XR-021 CONTRACTS.md R2-07).
+/// stored (XR-021 CONTRACTS.md R2-07 and R4-02 rule 3).
 ///
-/// The import holds the parser evidence and the Artifact payloads, so a blob an eraser removed
+/// The import holds the parser evidence, the Artifact payloads and the knowledge-file bytes, so a blob an eraser removed
 /// since it was stored is stored again from those bytes. Call it after the tenant lock and before
 /// the first row that references a blob.
 pub(crate) async fn register_blobs(
@@ -32,6 +33,15 @@ pub(crate) async fn register_blobs(
             }
         }
     }
+    for outcome in &prepared.knowledge_outcomes {
+        match &outcome.availability {
+            KnowledgeFileAvailability::Verified { blob_ref } => references.push(blob_ref),
+            KnowledgeFileAvailability::Quarantined {
+                evidence_blob_ref, ..
+            } => references.push(evidence_blob_ref),
+            KnowledgeFileAvailability::ReferencedOnly => {}
+        }
+    }
     for artifact in &prepared.plan.parsed.artifacts {
         staged.extend(
             artifact
@@ -40,6 +50,14 @@ pub(crate) async fn register_blobs(
                 .filter_map(|version| version.bytes.as_deref()),
         );
     }
+    staged.extend(
+        prepared
+            .plan
+            .parsed
+            .project_knowledge_files
+            .iter()
+            .filter_map(|file| file.bytes.as_deref()),
+    );
     crate::blob_protocol::register(tx, store, &references, &staged).await?;
     Ok(())
 }

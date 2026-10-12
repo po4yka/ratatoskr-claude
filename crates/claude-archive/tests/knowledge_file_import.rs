@@ -13,6 +13,12 @@
 mod cumulative;
 
 use cumulative::Series;
+use ratatoskr_claude_archive::privacy_deletion::{
+    EraseGate, FinalizationFault, PrivacyDeletionExecutionError, PrivacyDeletionExecutor,
+    PrivacyDeletionPlanner, RawExportDeletionPlanRequest, ResolvedDeletionBlob,
+};
+use ratatoskr_claude_archive::test_support::database_url;
+use ratatoskr_claude_archive::{Database, PlatformUsers};
 use ratatoskr_event_envelope::EventEnvelope;
 use ratatoskr_operation_contracts::{OperationReported, OperationStatus};
 use sha2::{Digest as _, Sha256};
@@ -390,4 +396,138 @@ async fn a_store_failure_while_ingesting_is_retried_not_failed() {
     assert_eq!(retried.expect("the next pass succeeds"), 1);
     assert_eq!(result.state, "completed");
     assert_eq!(result.operation.status, OperationStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn an_eraser_that_removed_a_knowledge_blob_before_registration_does_not_leave_a_dangling_row()
+{
+    // The account's only export is deleted: its rows are gone, its knowledge blob is listed for
+    // erasure and nothing references it yet.
+    let series = Series::open("knowledge-erase-race").await;
+    let (export_id, _) = series.import(&export_with(vec![verified_file()])).await;
+    let wide = Database::connect(
+        &database_url(series.db.name()),
+        6,
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .expect("a wider pool connects");
+    let request = Uuid::now_v7();
+    PrivacyDeletionPlanner::new(series.pool().clone())
+        .plan_raw_export(&RawExportDeletionPlanRequest {
+            tenant_ref: format!("user:{}", cumulative::USER),
+            account_id: series.account,
+            request_id: request,
+            request_key: "knowledge-erase".to_owned(),
+            correlation_id: format!("privacy-delete:{request}"),
+            export_id,
+        })
+        .await
+        .expect("the export deletion is planned");
+    let keys: Vec<String> = sqlx::query_scalar(
+        "select blob_ref from claude_archive.privacy_deletion_items
+         where request_id = $1 and action = 'erase_blob' and blob_ref is not null",
+    )
+    .bind(request)
+    .fetch_all(series.pool())
+    .await
+    .expect("the erase items are readable");
+    let knowledge_key = format!("sha256/{}", digest_of(GARDEN_PLAN));
+    assert!(
+        keys.contains(&knowledge_key),
+        "the knowledge blob of the deleted project is an erase item"
+    );
+    let resolved: Vec<ResolvedDeletionBlob> = keys
+        .into_iter()
+        .map(|key| {
+            let digest = key
+                .strip_prefix("sha256/")
+                .expect("an inventory key is a content address");
+            ResolvedDeletionBlob {
+                reference: series.store.locate(digest).expect("the blob is stored"),
+                key,
+            }
+        })
+        .collect();
+    let executor = PrivacyDeletionExecutor::new(wide.pool().clone());
+    let stopped = executor
+        .finalize_with_blob_store(
+            request,
+            &series.store,
+            &resolved,
+            Some(FinalizationFault::AfterRowsCommitted),
+        )
+        .await;
+    assert!(
+        matches!(
+            stopped,
+            Err(PrivacyDeletionExecutionError::Injected(
+                FinalizationFault::AfterRowsCommitted
+            ))
+        ),
+        "the deletion stops after its rows are committed and before any byte is erased"
+    );
+
+    // The eraser has decided to remove the knowledge blob and holds its digest lock when another
+    // account's identical file is ingested and its import is about to register it.
+    let gate = EraseGate::for_digest(digest_of(GARDEN_PLAN));
+    let eraser = {
+        let (executor, store, resolved) = (
+            executor.with_erase_gate(gate.clone()),
+            series.store.clone(),
+            resolved.clone(),
+        );
+        tokio::spawn(async move {
+            executor
+                .finalize_with_blob_store(request, &store, &resolved, None)
+                .await
+                .expect("the byte phase completes");
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), gate.reached())
+        .await
+        .expect("the eraser reaches the knowledge blob and holds its digest lock");
+    let other = cumulative::add_account(&series.db).await;
+    let mut second = export_with(vec![verified_file()]);
+    second["projects"][0]["description"] = serde_json::json!("another account");
+    series.receive_as(other, &second).await;
+    let pass = cumulative::worker_over(&series.db, &series.store, PlatformUsers::default());
+    let import = tokio::spawn(async move { pass.process_pending_once().await });
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let blocked = !import.is_finished();
+    gate.release();
+    eraser.await.expect("the eraser task ends");
+    let passes = import.await.expect("the import task ends");
+
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "select s.blob_ref from claude_archive.project_sources s
+         join claude_archive.projects p on p.project_id = s.project_id
+         where p.account_id = $1",
+    )
+    .bind(other)
+    .fetch_optional(series.pool())
+    .await
+    .expect("the sources are readable");
+    let resolves = series
+        .store
+        .locate(&digest_of(GARDEN_PLAN))
+        .and_then(|blob| series.store.verify(&blob));
+    wide.close().await;
+    series.finish().await;
+
+    assert!(
+        blocked,
+        "the import waits for the digest lock the eraser holds"
+    );
+    assert_eq!(passes.expect("the import survives the erasure"), 1);
+    assert_eq!(
+        row,
+        Some((Some(knowledge_key),)),
+        "the import committed its source row"
+    );
+    assert!(
+        resolves.is_ok(),
+        "the importer stored the blob again after the eraser removed it, so the row resolves: \
+         {resolves:?}"
+    );
 }
