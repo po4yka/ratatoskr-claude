@@ -494,6 +494,45 @@ async fn the_deletion_does_not_wait_for_edge() {
     assert!(unpublished > 0, "the commands wait for the pump");
 }
 
+#[tokio::test]
+async fn a_later_deletion_keeps_an_erasure_request_nobody_published_yet() {
+    // XR-021 CONTRACTS.md R5-12 rule 3: the erasure is eventual. A request the pump has not
+    // published (the broker is down, or the pump has not run) is the only record of the sequences
+    // it names, so a later tenant-scope deletion must neither remove it nor lose its sequences.
+    let imported = import_three("erasure-pending").await;
+    let pool = imported.series.pool();
+    let published = publish_all(pool).await;
+    imported.delete_export(imported.exports[0]).await;
+    let first = commands(pool).await;
+    assert!(
+        !first.is_empty() && first.iter().all(|command| !command.sequences.is_empty()),
+        "the first deletion asked for the erasure of the facts it removed: {first:?}"
+    );
+    let request = plan_tenant(&imported).await;
+    imported.execute(request).await;
+    let after = commands(pool).await;
+    imported.finish().await;
+
+    assert_well_formed(&after);
+    let owner = format!("user:{}", cumulative::USER);
+    let every_published: BTreeSet<u64> = published
+        .values()
+        .filter_map(|fact| u64::try_from(fact.sequence?).ok())
+        .collect();
+    assert_eq!(
+        named(&after).get(&owner),
+        Some(&every_published),
+        "every published fact is still requested after the later deletion: {after:?}"
+    );
+    for command in &first {
+        assert!(
+            after.iter().any(|kept| kept.id == command.id),
+            "the unpublished request {} survived the later deletion",
+            command.id
+        );
+    }
+}
+
 /// The content-bearing fact subjects Edge may erase from (XR-021 CONTRACTS.md R5-12 rule 4).
 const ERASABLE_SUBJECTS: [&str; 7] = [
     "evt.ai_archive.archive.imported.v1",

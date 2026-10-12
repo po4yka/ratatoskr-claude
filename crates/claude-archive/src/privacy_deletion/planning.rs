@@ -619,7 +619,9 @@ async fn add_delivery_rows(
     let outbox_rows: Vec<Uuid> = sqlx::query_scalar(
         "select event_id from claude_archive.outbox_events
          where (tenant_ref = any($1)
-                and not (event_type = 'ai_archive.subject.tombstoned.v1' and acknowledged_at is null))
+                and not (event_type = 'ai_archive.subject.tombstoned.v1' and acknowledged_at is null)
+                and not (event_type = 'platform.stream_erasure.requested.v1'
+                         and published_at is null and undeliverable_at is null))
             or (aggregate_type = 'export' and aggregate_id = any($2))
          order by event_id",
     )
