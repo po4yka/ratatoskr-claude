@@ -115,6 +115,10 @@ pub enum ReparseError {
     /// Blob storage failed.
     #[error("reparse blob operation failed")]
     Blob(#[from] StoreError),
+    /// The blob store failed while a knowledge file was ingested. Retryable: nothing references
+    /// the blob yet, so the next pass ingests the file again (XR-021 CONTRACTS.md R4-02 rule 1).
+    #[error("knowledge file ingest failed")]
+    KnowledgeIngest(#[source] StoreError),
     /// The exact compiled parser failed.
     #[error("reparse parser execution failed")]
     Parser(#[from] ParserExecutionError),

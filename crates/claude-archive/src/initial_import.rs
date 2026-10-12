@@ -21,9 +21,10 @@ use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
 
 use crate::contract_projection::{GapInput, ImportProjection, Omitted, ReportView, gaps_for};
 use crate::import_artifacts::{persist_artifacts, register_blobs};
+use crate::initial_projection::persist_initial_projection;
 use crate::reparse::{
-    ReparseError, ReparsePlan, apply_conversations, compare, current_projection, decode_hex,
-    encode_hex, read_parser_evidence,
+    ReparseError, ReparsePlan, compare, current_projection, decode_hex, encode_hex,
+    read_parser_evidence,
 };
 use crate::{
     ArchiveInspector, BlobRef, BlobStore, DigestAlgorithm, Limits, MediaType, ParserCapability,
@@ -54,6 +55,8 @@ pub(crate) struct PreparedInitialImport {
     completeness: crate::ArchiveCompletenessReport,
     detected: crate::DetectedSchema,
     pub(crate) artifacts: Vec<crate::ReconciledArtifact>,
+    /// One ingest outcome per parsed knowledge file, in file order.
+    pub(crate) knowledge_outcomes: Vec<crate::ProjectKnowledgeIngestResult>,
 }
 
 #[derive(Debug)]
@@ -229,10 +232,17 @@ impl InitialImportWorker {
         })?;
         let artifacts =
             crate::ArtifactReconciler::new(&self.blobs).reconcile(std::slice::from_ref(&parsed))?;
+        let ingestor = crate::ProjectKnowledgeIngestor::new(&self.blobs);
+        let knowledge_outcomes = parsed
+            .project_knowledge_files
+            .iter()
+            .map(|file| ingestor.ingest(file))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ReparseError::KnowledgeIngest)?;
         let completeness = crate::ArchiveCompletenessReport::from_ingest(
             input.archive_id.to_string(),
             &parsed,
-            &[],
+            &knowledge_outcomes,
         );
         let evidence_ref = self
             .blobs
@@ -263,6 +273,7 @@ impl InitialImportWorker {
             completeness,
             detected,
             artifacts,
+            knowledge_outcomes,
         })
     }
 
@@ -322,7 +333,7 @@ impl InitialImportWorker {
             .bind(Uuid::now_v7()).bind(prepared.plan.export_id).bind(format!("sha256/{}",prepared.evidence_ref.digest_hex))
             .bind(decode_hex(&prepared.evidence_ref.digest_hex).ok_or(ReparseError::Conflict)?)
             .bind(i64::try_from(prepared.evidence_ref.length_bytes).map_err(|_| ReparseError::Conflict)?).execute(&mut *tx).await?;
-        persist_initial_projection(&mut tx, &prepared.plan).await?;
+        persist_initial_projection(&mut tx, &prepared.plan, &prepared.knowledge_outcomes).await?;
         persist_artifacts(&mut tx, &prepared.plan, &prepared.artifacts).await?;
         sqlx::query("insert into claude_archive.completeness_reports (report_id,run_id,status,discovered_counts,missing_assets,unknown_variants,warnings) values ($1,$2,$3,$4,$5,$6,$7) on conflict (run_id) do nothing")
             .bind(Uuid::now_v7()).bind(run_id).bind(status).bind(&counts)
@@ -713,39 +724,6 @@ fn operation_report_envelope(report: &OperationReported) -> Result<EventEnvelope
     Ok(envelope)
 }
 
-async fn persist_initial_projection(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    plan: &ReparsePlan,
-) -> Result<(), ReparseError> {
-    for project in &plan.parsed.projects {
-        let instructions = plan
-            .parsed
-            .project_instructions
-            .iter()
-            .find(|instruction| instruction.project_external_id == project.external_id)
-            .map(|instruction| instruction.text.as_str());
-        let project_id: Uuid = sqlx::query_scalar("insert into claude_archive.projects (project_id,account_id,external_project_id,title,description,instructions,parser_name,parser_version,upstream_state) values ($1,$2,$3,$4,$5,$6,$7,$8,'present') on conflict (account_id,external_project_id) do update set title=excluded.title,description=excluded.description,instructions=excluded.instructions,parser_name=excluded.parser_name,parser_version=excluded.parser_version,updated_at=now() returning project_id")
-            .bind(Uuid::now_v7()).bind(plan.tenant_id).bind(&project.external_id).bind(&project.name)
-            .bind(&project.description).bind(instructions)
-            .bind(&project.parser.parser_identifier).bind(&project.parser.parser_version)
-            .fetch_one(&mut **tx).await?;
-        sqlx::query("insert into claude_archive.export_observations (export_id,subject_kind,subject_id) values ($1,'project',$2) on conflict do nothing")
-            .bind(plan.export_id).bind(project_id).execute(&mut **tx).await?;
-        for source in plan
-            .parsed
-            .project_knowledge_files
-            .iter()
-            .filter(|source| source.project_external_id == project.external_id)
-        {
-            sqlx::query("insert into claude_archive.project_sources (source_id,project_id,external_source_id,source_kind,title,mime_type,byte_size,locally_backed_up) values ($1,$2,$3,'file',$4,$5,$6,false) on conflict (project_id,external_source_id) do update set title=excluded.title,mime_type=excluded.mime_type,byte_size=excluded.byte_size,last_seen_at=now()")
-                .bind(Uuid::now_v7()).bind(project_id).bind(&source.external_id).bind(&source.filename).bind(&source.media_type)
-                .bind(source.bytes.as_ref().and_then(|bytes| i64::try_from(bytes.len()).ok())).execute(&mut **tx).await?;
-        }
-    }
-    apply_conversations(tx, plan).await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use ratatoskr_ai_archive_contracts::platform_receipt::incomplete_import_warning;
@@ -805,5 +783,32 @@ mod tests {
         assert_eq!(report.status, OperationStatus::Succeeded);
         assert!(report.warnings.is_empty());
         assert!(report.validate().is_ok());
+    }
+
+    #[test]
+    fn a_store_failure_while_ingesting_a_knowledge_file_is_never_permanent() {
+        // CONTRACTS.md R4-02 rule 1: nothing references the blob yet, so the next pass ingests
+        // again, whatever the class of the store error.
+        for error in [
+            crate::StoreError::Io(std::io::Error::other("the disk is full")),
+            crate::StoreError::Unavailable,
+            crate::StoreError::Collision {
+                digest_hex: "0".repeat(64),
+            },
+            crate::StoreError::Missing {
+                digest_hex: "0".repeat(64),
+            },
+        ] {
+            assert!(
+                !is_permanent_import_error(&ReparseError::KnowledgeIngest(error)),
+                "a knowledge-file ingest failure is retried, never a permanent import failure"
+            );
+        }
+        assert!(
+            is_permanent_import_error(&ReparseError::Blob(crate::StoreError::Collision {
+                digest_hex: "0".repeat(64),
+            })),
+            "the same class of error elsewhere in the import stays permanent"
+        );
     }
 }

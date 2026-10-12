@@ -24,6 +24,7 @@ pub mod fixture_admission;
 mod import_artifacts;
 pub mod import_state;
 mod initial_import;
+mod initial_projection;
 pub mod knowledge_link;
 pub mod operation_outbox;
 pub mod parser_migration;

@@ -6,8 +6,8 @@ Documentation: no failing test can precede it.
 
 ## 1. The import ingests knowledge files (R4-02 rules 1, 2, 4, 5, 6)
 
-- [ ] 1.1 RED: `crates/claude-archive/tests/knowledge_file_import.rs` adds `an_archive_with_a_verified_knowledge_file_imports_complete`, `a_digest_mismatch_is_quarantined_and_the_import_is_partial`, `a_missing_declared_digest_is_quarantined`, `an_invalid_media_type_is_quarantined`, `a_referenced_only_file_stays_a_missing_gap_without_a_blob`, `a_later_export_that_carries_the_bytes_upgrades_a_referenced_source` and `a_store_failure_while_ingesting_is_retried_not_failed`; `crates/claude-archive/tests/project_knowledge.rs` adds `an_empty_byte_array_is_a_reference_without_bytes`. They fail because the import reports `partial`, `assets_partial` and `knowledge_file_missing_bytes`, writes no blob and classifies the ingest error as permanent.
-- [ ] 1.2 GREEN: `PreparedInitialImport::knowledge_outcomes`, the ingest in `prepare_initial_import`, `ReparseError::KnowledgeIngest`, the source persistence in `initial_projection.rs`.
+- [x] 1.1 RED: `crates/claude-archive/tests/knowledge_file_import.rs` adds `an_archive_with_a_verified_knowledge_file_imports_complete`, `a_digest_mismatch_is_quarantined_and_the_import_is_partial`, `a_missing_declared_digest_is_quarantined`, `an_invalid_media_type_is_quarantined`, `a_referenced_only_file_stays_a_missing_gap_without_a_blob`, `a_later_export_that_carries_the_bytes_upgrades_a_referenced_source` and `a_store_failure_while_ingesting_is_retried_not_failed`. They fail because the import reports `partial`, `assets_partial` and `knowledge_file_missing_bytes`, writes no blob and never attempts the ingest, so a faulted store is not even reached. `a_referenced_only_file_stays_a_missing_gap_without_a_blob` already passes and guards the honesty rule.
+- [x] 1.2 GREEN: `PreparedInitialImport::knowledge_outcomes`, the ingest in `prepare_initial_import`, `ReparseError::KnowledgeIngest`, the source persistence in `initial_projection.rs`.
 
 ## 2. The knowledge blobs follow the registration protocol (R4-02 rule 3)
 

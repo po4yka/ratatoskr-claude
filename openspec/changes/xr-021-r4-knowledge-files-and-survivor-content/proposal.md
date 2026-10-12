@@ -11,7 +11,7 @@ Round 4 of changeset XR-021 fixes two defects that the Round 3 native smokes and
 - `export_observations` gains a nullable `content_digest`, `entity_versions` keeps one snapshot per distinct project and conversation version while some export names it, and `projects` and `conversations` name the digest of the content their row holds. The import writes the newest version into the shared row, records the digest each export presented and reparse compares an export's own digest.
 - The row-removal phase of a deletion restores every surviving project and conversation whose current digest no retained export presented, removes the project sources that no retained export observed (their blobs go through the erase protocol), removes the facts of a deleted archive that remain under a retained subject, and prunes unreferenced snapshots. The survivor fact carries the restored content under the earliest retained export that presented it.
 
-Breaking, with no shims: `schema.sql` gains `export_observations.content_digest`, `projects.content_digest`, `conversations.content_digest` and `entity_versions` in place (a development database must be recreated); the parsed `Conversation`, `Message`, `ContentPart` and `ParserStamp` types derive `Serialize` and `Deserialize`; an empty knowledge-file byte array is now a reference without bytes instead of an ingest error.
+Breaking, with no shims: `schema.sql` gains `export_observations.content_digest`, `projects.content_digest`, `conversations.content_digest` and `entity_versions` in place (a development database must be recreated); the parsed `Conversation`, `Message`, `ContentPart` and `ParserStamp` types derive `Serialize` and `Deserialize`.
 
 ## Capabilities
 
