@@ -9,10 +9,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use ratatoskr_event_envelope::EventEnvelope;
+use ratatoskr_event_envelope::{CommandEnvelope, EventEnvelope};
 use sqlx::Row as _;
 use uuid::Uuid;
 
+/// The only command type this service publishes: the request that Edge erase messages it published
+/// from the events stream (XR-021 CONTRACTS.md R5-12). Its outbox row stores a command envelope.
+pub(crate) const STREAM_ERASURE_TYPE: &str = "platform.stream_erasure.requested.v1";
 /// The Platform-owned subject for the per-provider operation report ingress.
 const OPERATION_REPORTED_SUBJECT: &str = "evt.ai-archive.claude.operation.reported.v1";
 /// The inbox prefix of every connection this service opens. The deployed ACL lets the identity
@@ -47,6 +50,8 @@ pub(crate) fn subject_for_event_type(event_type: &str) -> Option<&'static str> {
         "ai_archive.artifact.added.v1" => "evt.ai_archive.artifact.added.v1",
         "ai_archive.artifact.updated.v1" => "evt.ai_archive.artifact.updated.v1",
         "ai_archive.subject.tombstoned.v1" => "evt.ai_archive.subject.tombstoned.v1",
+        // A command publishes to `cmd.` plus its type (XR-021 CONTRACTS.md S02 rule 2).
+        STREAM_ERASURE_TYPE => "cmd.platform.stream_erasure.requested.v1",
         _ => return None,
     })
 }
@@ -340,13 +345,11 @@ impl OutboxPublisher {
             let event_type: String = row.try_get("event_type").map_err(OutboxError::Database)?;
             let subject =
                 subject_for_event_type(&event_type).ok_or(OutboxError::UnknownEventType)?;
-            let envelope: EventEnvelope =
-                serde_json::from_value(row.try_get("envelope").map_err(OutboxError::Database)?)
-                    .map_err(OutboxError::Encode)?;
-            if envelope.event_type.to_wire() != event_type || envelope.event_id.0 != event_id {
-                return Err(OutboxError::EnvelopeMismatch);
-            }
-            let body = serde_json::to_vec(&envelope).map_err(OutboxError::Encode)?;
+            let body = stored_body(
+                &event_type,
+                event_id,
+                row.try_get("envelope").map_err(OutboxError::Database)?,
+            )?;
             if body.len() > largest_body {
                 if resend {
                     // It fitted when it was first published, so the broker limit shrank. Treat it
@@ -364,15 +367,18 @@ impl OutboxPublisher {
                 .publish_with_headers(subject, headers, body.into())
                 .await
             {
-                Ok(acknowledgement) => acknowledgement.await.map(|_| ()).map_err(|_| "ack_failed"),
+                Ok(acknowledgement) => acknowledgement
+                    .await
+                    .map(|acknowledged| acknowledged.sequence)
+                    .map_err(|_| "ack_failed"),
                 Err(_) => Err("publish_failed"),
             };
             match acknowledged {
-                Ok(()) => {
+                Ok(sequence) => {
                     if resend {
                         self.mark_resent(event_id).await?;
                     } else {
-                        self.mark_published(event_id).await?;
+                        self.mark_published(event_id, sequence).await?;
                     }
                     published += 1;
                 }
@@ -410,18 +416,20 @@ impl OutboxPublisher {
         Ok(())
     }
 
-    /// Marks a row published after the broker acknowledged it. A tombstone is also scheduled for
-    /// its first resend, one interval later.
-    async fn mark_published(&self, event_id: Uuid) -> Result<(), OutboxError> {
+    /// Marks a row published after the broker acknowledged it, and records the stream sequence
+    /// of that acknowledgement (a duplicate acknowledgement carries the original sequence). A
+    /// tombstone is also scheduled for its first resend, one interval later.
+    async fn mark_published(&self, event_id: Uuid, sequence: u64) -> Result<(), OutboxError> {
         sqlx::query(
             "update claude_archive.outbox_events
-             set published_at = now(), last_error = null,
+             set published_at = now(), last_error = null, published_stream_seq = $3,
                  next_resend_at = case when event_type = 'ai_archive.subject.tombstoned.v1'
                                        then now() + make_interval(secs => $2) end
              where event_id = $1 and published_at is null",
         )
         .bind(event_id)
         .bind(self.resend.after.as_secs_f64())
+        .bind(i64::try_from(sequence).map_err(|_| OutboxError::EnvelopeMismatch)?)
         .execute(&self.pool)
         .await
         .map_err(OutboxError::Database)?;
@@ -463,6 +471,29 @@ impl OutboxPublisher {
         .map_err(OutboxError::Database)?;
         Ok(())
     }
+}
+
+/// The bytes a stored row is published as: its complete envelope, which must be the envelope of
+/// the type and id the row is filed under. A fact is an event envelope; the stream erasure request
+/// is a command envelope.
+fn stored_body(
+    event_type: &str,
+    event_id: Uuid,
+    stored: serde_json::Value,
+) -> Result<Vec<u8>, OutboxError> {
+    if event_type == STREAM_ERASURE_TYPE {
+        let envelope: CommandEnvelope =
+            serde_json::from_value(stored).map_err(OutboxError::Encode)?;
+        if envelope.command_type.to_wire() != event_type || envelope.command_id.0 != event_id {
+            return Err(OutboxError::EnvelopeMismatch);
+        }
+        return serde_json::to_vec(&envelope).map_err(OutboxError::Encode);
+    }
+    let envelope: EventEnvelope = serde_json::from_value(stored).map_err(OutboxError::Encode)?;
+    if envelope.event_type.to_wire() != event_type || envelope.event_id.0 != event_id {
+        return Err(OutboxError::EnvelopeMismatch);
+    }
+    serde_json::to_vec(&envelope).map_err(OutboxError::Encode)
 }
 
 /// Failure while delivering a pending archive event.

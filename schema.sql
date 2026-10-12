@@ -816,6 +816,7 @@ create table claude_archive.outbox_events (
     next_attempt_at timestamptz,
     last_error      text,
     undeliverable_at timestamptz,
+    published_stream_seq bigint,
     acknowledged_at timestamptz,
     ack_outcome     text,
     resend_count    integer     not null default 0,
@@ -831,10 +832,11 @@ create table claude_archive.outbox_events (
                               'ai_archive.project.updated.v1',
                               'ai_archive.artifact.added.v1',
                               'ai_archive.artifact.updated.v1',
-                              'ai_archive.subject.tombstoned.v1')),
+                              'ai_archive.subject.tombstoned.v1',
+                              'platform.stream_erasure.requested.v1')),
     constraint outbox_events_aggregate_type_check
         check (aggregate_type in ('operation', 'export', 'import_run', 'project', 'conversation', 'message',
-                                  'artifact', 'asset', 'archive', 'tombstone')),
+                                  'artifact', 'asset', 'archive', 'tombstone', 'privacy_request')),
     constraint outbox_events_envelope_object_check check (jsonb_typeof(envelope) = 'object'),
     constraint outbox_events_event_payload_key unique (event_type, payload_digest)
 );
@@ -844,6 +846,9 @@ comment on table claude_archive.outbox_events is
 
 comment on column claude_archive.outbox_events.undeliverable_at is
     'Set when the stored envelope is larger than the connected broker accepts, so retrying can never help. The pump skips the row, records last_error = payload_too_large, and the row never makes readiness false.';
+
+comment on column claude_archive.outbox_events.published_stream_seq is
+    'The stream sequence of the broker acknowledgement of the first publish (XR-021 CONTRACTS.md R5-12 rule 2). A deletion that removes a published fact row asks Edge to erase the message at this sequence.';
 
 comment on column claude_archive.outbox_events.next_resend_at is
     'Only rows of ai_archive.subject.tombstoned.v1 use the four acknowledgement columns (XR-021 CONTRACTS.md R5-11). The pump publishes a published, unacknowledged tombstone again when this time has passed, and stops when acknowledged_at is set.';

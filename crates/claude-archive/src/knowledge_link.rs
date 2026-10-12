@@ -104,10 +104,12 @@ impl<'a> KnowledgeLinkStore<'a> {
         &self,
         completion: &AiArchiveAnalysisCompleted,
     ) -> Result<bool, KnowledgeLinkError> {
-        let rows: Vec<(serde_json::Value,)> =
-            sqlx::query_as("select envelope from claude_archive.outbox_events")
-                .fetch_all(self.database.pool())
-                .await?;
+        let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+            "select envelope from claude_archive.outbox_events
+                 where event_type like 'ai_archive.%'",
+        )
+        .fetch_all(self.database.pool())
+        .await?;
         for (raw,) in rows {
             let envelope: EventEnvelope = serde_json::from_value(raw)?;
             if completion_matches_envelope(completion, &envelope) {
