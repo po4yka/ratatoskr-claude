@@ -16,6 +16,7 @@ use super::loaders::{
 };
 use super::*;
 use crate::announced_subjects;
+use crate::stream_erasure::{ErasureRequest, drop_published_fact_rows};
 use crate::{DigestAlgorithm, MediaType};
 
 /// The rows a deletion keeps because an export that stays observed them.
@@ -38,6 +39,9 @@ pub(crate) struct Deletion<'a> {
     pub(crate) archives: &'a [Uuid],
     /// The instant of the archive tombstones; every fact is stamped after it.
     pub(crate) tombstoned_at: WireTimestamp,
+    /// The request on whose behalf published facts that are replaced or dropped are erased from
+    /// the stream (XR-021 CONTRACTS.md R5-12 rule 3).
+    pub(crate) erasure: &'a ErasureRequest,
 }
 
 /// What a fact needs to name the retained export it is announced under.
@@ -214,10 +218,10 @@ pub(crate) async fn reannounce(
         conversations(transaction, deletion, &provider, &survivors.conversations).await?;
     facts.extend(conversation_facts);
     facts.extend(artifacts(transaction, deletion, &provider, &survivors.artifacts).await?);
-    drop_stale_conversation_facts(transaction, &stale).await?;
+    drop_stale_conversation_facts(transaction, deletion.erasure, &stale).await?;
     for (ordinal, fact) in facts.iter().enumerate() {
         let at = after(transaction, deletion.tombstoned_at, ordinal).await?;
-        ArchiveOutbox::enqueue_again_in(transaction, fact, at).await?;
+        ArchiveOutbox::enqueue_again_in(transaction, fact, at, deletion.erasure).await?;
     }
     Ok(facts.len())
 }
@@ -348,19 +352,21 @@ async fn conversations(
 /// the restored conversation says; the fact announced again replaces them.
 async fn drop_stale_conversation_facts(
     transaction: &mut Transaction<'_, Postgres>,
+    erasure: &ErasureRequest,
     stale: &[(TenantRef, String)],
 ) -> Result<(), ReparseError> {
     for (owner, aggregate) in stale {
-        sqlx::query(
-            "delete from claude_archive.outbox_events
+        let event_ids: Vec<Uuid> = sqlx::query_scalar(
+            "select event_id from claude_archive.outbox_events
              where tenant_ref = $1 and aggregate_type = 'conversation' and aggregate_id = $2
                and event_type = any($3)",
         )
         .bind(owner.to_string())
         .bind(aggregate)
         .bind([CONVERSATION_ADDED, CONVERSATION_UPDATED].as_slice())
-        .execute(&mut **transaction)
+        .fetch_all(&mut **transaction)
         .await?;
+        drop_published_fact_rows(transaction, erasure, &event_ids).await?;
     }
     Ok(())
 }

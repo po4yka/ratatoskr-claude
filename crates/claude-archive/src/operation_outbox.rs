@@ -579,6 +579,15 @@ mod tests {
     }
 
     #[test]
+    fn the_stream_erasure_command_publishes_to_cmd_plus_its_type_name() {
+        assert_eq!(
+            subject_for_event_type("platform.stream_erasure.requested.v1"),
+            Some("cmd.platform.stream_erasure.requested.v1"),
+            "S02 rule 2: a command publishes to `cmd.` plus its command type"
+        );
+    }
+
+    #[test]
     fn an_event_type_outside_the_closed_list_has_no_subject() {
         for event_type in [
             "claude.subject.reparsed.v1",

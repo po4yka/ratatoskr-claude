@@ -297,6 +297,15 @@ async fn an_unacknowledged_tombstone_is_published_again_until_knowledge_acknowle
     .fetch_one(rig.pool())
     .await
     .expect("the row is readable");
+    // The transcript of the loop, visible with `--nocapture`: one tombstone, the stream copies
+    // (by Nats-Msg-Id) after each step, and what the row recorded.
+    eprintln!(
+        "tombstone {event_id}\n  1. published, no acknowledgement: stream copies {after_first:?}, \
+         unacknowledged gauge {gauge_unacknowledged}\n  2. due again, republished unchanged: \
+         stream copies {after_resend:?}\n  3. Knowledge acknowledges (applied): row records \
+         {outcome:?}, resend_count {resent}\n  4. due again after the acknowledgement: published \
+         {after_acknowledgement}, stream copies {after_stop:?}, unacknowledged gauge {gauge_after}"
+    );
     rig.db.cleanup().await.expect("cleanup succeeds");
 
     assert_eq!(

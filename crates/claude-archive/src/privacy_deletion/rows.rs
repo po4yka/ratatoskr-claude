@@ -11,6 +11,7 @@ use ratatoskr_identifiers::WireTimestamp;
 
 use super::*;
 use crate::announced_subjects;
+use crate::stream_erasure::{ErasureRequest, drop_published_fact_rows};
 
 /// Every `(table, column)` foreign key into a deletion root that is not `ON DELETE CASCADE` and
 /// that deletion deals with itself, either by deleting the referencing rows with their parent or
@@ -136,6 +137,8 @@ impl PrivacyDeletionExecutor {
             delete_tenant_lifecycle_rows(&mut transaction, &request.tenant_ref, &accounts).await?;
         }
         delete_export_dependents(&mut transaction, request_id).await?;
+        let erasure = ErasureRequest::new(request_id, &request.correlation_id)?;
+        drop_planned_outbox_rows(&mut transaction, request_id, &erasure).await?;
         delete_inventory_rows(&mut transaction, request_id).await?;
         if tenant_scope {
             for account_id in &accounts {
@@ -167,9 +170,11 @@ impl PrivacyDeletionExecutor {
             request_id,
             &archives,
             removed_at,
+            &erasure,
         )
         .await?;
-        super::tombstones::purge_facts_of_deleted_archives(&mut transaction, &archives).await?;
+        super::tombstones::purge_facts_of_deleted_archives(&mut transaction, &erasure, &archives)
+            .await?;
         // The tombstones carry the owners now, so the ledger rows of what they remove go with it.
         announced_subjects::forget_subjects(&mut transaction, &tombstoned, &accounts).await?;
         announced_subjects::forget_archives(&mut transaction, &archives).await?;
@@ -300,6 +305,24 @@ async fn retain_blobs_still_referenced(
     Ok(())
 }
 
+/// Removes the outbox rows the inventory names, asking Edge to erase the stream copy of every
+/// published fact among them (XR-021 CONTRACTS.md R5-12 rule 3).
+async fn drop_planned_outbox_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    request_id: Uuid,
+    erasure: &ErasureRequest,
+) -> Result<(), crate::ArchiveEventError> {
+    let event_ids: Vec<Uuid> = sqlx::query_scalar(
+        "select subject_id::uuid from claude_archive.privacy_deletion_items
+         where request_id = $1 and item_kind = 'outbox' and action = 'remove_record'",
+    )
+    .bind(request_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+    drop_published_fact_rows(transaction, erasure, &event_ids).await?;
+    Ok(())
+}
+
 async fn delete_inventory_rows(
     transaction: &mut Transaction<'_, Postgres>,
     request_id: Uuid,
@@ -344,8 +367,6 @@ async fn delete_inventory_rows(
          (select subject_id from claude_archive.privacy_deletion_items where request_id = $1 and item_kind = 'analysis_link' and action = 'remove_record')",
         "delete from claude_archive.inbox_events where event_id::text in
          (select subject_id from claude_archive.privacy_deletion_items where request_id = $1 and item_kind = 'inbox' and action = 'remove_record')",
-        "delete from claude_archive.outbox_events where event_id::text in
-         (select subject_id from claude_archive.privacy_deletion_items where request_id = $1 and item_kind = 'outbox' and action = 'remove_record')",
         "delete from claude_archive.extracted_artifacts where extracted_artifact_id::text in
          (select subject_id from claude_archive.privacy_deletion_items where request_id = $1 and item_kind = 'extracted_artifact')",
         "delete from claude_archive.exports where export_id::text in

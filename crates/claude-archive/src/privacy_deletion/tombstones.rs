@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use super::*;
 use crate::announced_subjects;
 use crate::contract_projection::{Deletion, Survivors, reannounce};
+use crate::stream_erasure::{ErasureRequest, drop_published_fact_rows};
 use crate::{ArchiveEventError, ArchiveOutbox};
 
 /// One subject that needs a downstream tombstone for one owner, read before its rows are deleted.
@@ -283,6 +284,7 @@ pub(super) async fn reannounce_survivors(
     request_id: Uuid,
     archives: &[Uuid],
     tombstoned_at: WireTimestamp,
+    erasure: &ErasureRequest,
 ) -> Result<usize, PrivacyDeletionExecutionError> {
     if archives.is_empty() {
         return Ok(0);
@@ -310,6 +312,7 @@ pub(super) async fn reannounce_survivors(
     let deletion = Deletion {
         archives,
         tombstoned_at,
+        erasure,
     };
     Ok(reannounce(transaction, &deletion, &survivors).await?)
 }
@@ -323,20 +326,21 @@ pub(super) async fn reannounce_survivors(
 /// stay, and the facts of subjects the request removes already left with their rows.
 pub(super) async fn purge_facts_of_deleted_archives(
     transaction: &mut Transaction<'_, Postgres>,
+    erasure: &ErasureRequest,
     archives: &[Uuid],
 ) -> Result<u64, PrivacyDeletionExecutionError> {
     if archives.is_empty() {
         return Ok(0);
     }
     let archives: Vec<String> = archives.iter().map(Uuid::to_string).collect();
-    let removed = sqlx::query(
-        "delete from claude_archive.outbox_events
+    let event_ids: Vec<Uuid> = sqlx::query_scalar(
+        "select event_id from claude_archive.outbox_events
          where event_type like 'ai_archive.%'
            and event_type <> 'ai_archive.subject.tombstoned.v1'
            and (envelope #>> '{payload,import_provenance,ai_archive_id}') = any($1)",
     )
     .bind(&archives)
-    .execute(&mut **transaction)
+    .fetch_all(&mut **transaction)
     .await?;
-    Ok(removed.rows_affected())
+    Ok(drop_published_fact_rows(transaction, erasure, &event_ids).await?)
 }

@@ -10,6 +10,7 @@ use ratatoskr_identifiers::{EntityRef, EventId, TenantRef, WireTimestamp};
 use sha2::{Digest as _, Sha256};
 
 use crate::Database;
+use crate::stream_erasure::{ErasureRequest, drop_published_fact_rows};
 
 /// One normalized archive fact eligible for durable publication.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +68,9 @@ pub enum ArchiveEventError {
     /// A normalized object was paired with another import's provenance.
     #[error("a normalized archive event belongs to another import")]
     ProvenanceMismatch,
+    /// A command envelope could not be built from its contract values.
+    #[error("the stream erasure command could not be encoded")]
+    Command(#[from] ratatoskr_event_envelope::CommandError),
 }
 
 /// Persists complete archive event envelopes in the owning transactional outbox.
@@ -166,7 +170,7 @@ impl<'a> ArchiveOutbox<'a> {
         fact: &ArchiveEventFact,
         occurred_at: WireTimestamp,
     ) -> Result<OutboxEvent, ArchiveEventError> {
-        Self::enqueue_with(transaction, fact, occurred_at, false).await
+        Self::enqueue_with(transaction, fact, occurred_at, None).await
     }
 
     /// Builds and stores one event that announces a subject again, in a caller-owned transaction.
@@ -175,7 +179,9 @@ impl<'a> ArchiveOutbox<'a> {
     /// ordinary insert would keep the old row, which Knowledge has already consumed. A deletion
     /// that tombstoned the archive that row was last announced under needs Knowledge to receive it
     /// again, so the identical row is replaced by a new event with its own id (XR-021
-    /// CONTRACTS.md R4-03).
+    /// CONTRACTS.md R4-03). The replaced row, if it was published, is a stream message that carries
+    /// the same content under an event id Knowledge already consumed, so Edge is asked to erase it
+    /// (R5-12 rule 3).
     ///
     /// # Errors
     ///
@@ -184,15 +190,16 @@ impl<'a> ArchiveOutbox<'a> {
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         fact: &ArchiveEventFact,
         occurred_at: WireTimestamp,
+        erasure: &ErasureRequest,
     ) -> Result<OutboxEvent, ArchiveEventError> {
-        Self::enqueue_with(transaction, fact, occurred_at, true).await
+        Self::enqueue_with(transaction, fact, occurred_at, Some(erasure)).await
     }
 
     async fn enqueue_with(
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         fact: &ArchiveEventFact,
         occurred_at: WireTimestamp,
-        replace_identical: bool,
+        replace_identical: Option<&ErasureRequest>,
     ) -> Result<OutboxEvent, ArchiveEventError> {
         let event_id = EventId::new_v7();
         let envelope = build_envelope(event_id, fact, occurred_at, &event_id.as_entity_ref())?;
@@ -200,15 +207,16 @@ impl<'a> ArchiveOutbox<'a> {
         let envelope_json =
             serde_json::to_value(&envelope).map_err(|_| ArchiveEventError::Identifier)?;
         let payload_digest = Sha256::digest(serde_json::to_vec(&envelope.payload)?).to_vec();
-        if replace_identical {
-            sqlx::query(
-                "delete from claude_archive.outbox_events
+        if let Some(erasure) = replace_identical {
+            let replaced: Vec<uuid::Uuid> = sqlx::query_scalar(
+                "select event_id from claude_archive.outbox_events
                  where event_type = $1 and payload_digest = $2",
             )
             .bind(envelope.event_type.to_wire())
             .bind(&payload_digest)
-            .execute(&mut **transaction)
+            .fetch_all(&mut **transaction)
             .await?;
+            drop_published_fact_rows(transaction, erasure, &replaced).await?;
         }
         let stored: Option<serde_json::Value> = sqlx::query_scalar(
             "insert into claude_archive.outbox_events

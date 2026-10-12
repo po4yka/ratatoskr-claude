@@ -39,6 +39,7 @@ pub mod privacy_deletion;
 pub mod project_knowledge;
 pub mod receipt;
 pub mod reparse;
+mod stream_erasure;
 pub mod telemetry;
 
 pub use archive_inspection::{
