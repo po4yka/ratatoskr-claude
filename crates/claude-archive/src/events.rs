@@ -157,12 +157,50 @@ impl<'a> ArchiveOutbox<'a> {
         fact: &ArchiveEventFact,
         occurred_at: WireTimestamp,
     ) -> Result<OutboxEvent, ArchiveEventError> {
+        Self::enqueue_with(transaction, fact, occurred_at, false).await
+    }
+
+    /// Builds and stores one event that announces a subject again, in a caller-owned transaction.
+    ///
+    /// A fact whose payload is identical to one already stored is the same announcement, and the
+    /// ordinary insert would keep the old row, which Knowledge has already consumed. A deletion
+    /// that tombstoned the archive that row was last announced under needs Knowledge to receive it
+    /// again, so the identical row is replaced by a new event with its own id (XR-021
+    /// CONTRACTS.md R4-03).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArchiveEventError`] when the fact cannot be encoded or the insert fails.
+    pub(crate) async fn enqueue_again_in(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        fact: &ArchiveEventFact,
+        occurred_at: WireTimestamp,
+    ) -> Result<OutboxEvent, ArchiveEventError> {
+        Self::enqueue_with(transaction, fact, occurred_at, true).await
+    }
+
+    async fn enqueue_with(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        fact: &ArchiveEventFact,
+        occurred_at: WireTimestamp,
+        replace_identical: bool,
+    ) -> Result<OutboxEvent, ArchiveEventError> {
         let event_id = EventId::new_v7();
         let envelope = build_envelope(event_id, fact, occurred_at, &event_id.as_entity_ref())?;
         let (aggregate_type, aggregate_id) = fact.aggregate()?;
         let envelope_json =
             serde_json::to_value(&envelope).map_err(|_| ArchiveEventError::Identifier)?;
         let payload_digest = Sha256::digest(serde_json::to_vec(&envelope.payload)?).to_vec();
+        if replace_identical {
+            sqlx::query(
+                "delete from claude_archive.outbox_events
+                 where event_type = $1 and payload_digest = $2",
+            )
+            .bind(envelope.event_type.to_wire())
+            .bind(&payload_digest)
+            .execute(&mut **transaction)
+            .await?;
+        }
         let stored: Option<serde_json::Value> = sqlx::query_scalar(
             "insert into claude_archive.outbox_events
                  (event_id, event_type, aggregate_type, aggregate_id, envelope,

@@ -4,8 +4,8 @@
 //! it, and a later export that sees the same record announces nothing. When a deletion tombstones
 //! that archive, Knowledge drops everything announced under it, including what a retained export
 //! still holds. Each such survivor is announced again as an update whose provenance names the
-//! earliest retained export that observed it, stamped after the tombstone so the pump publishes it
-//! afterwards.
+//! earliest retained export that presented the content the survivor holds now, stamped after the
+//! tombstone so the pump publishes it afterwards.
 
 use std::collections::BTreeMap;
 
@@ -143,16 +143,28 @@ async fn announced_under_deleted(
         }))
 }
 
-/// The earliest retained export that observed each subject of `kind`.
+/// The earliest retained export that presented the content each subject holds now, by
+/// `received_at` and then export id.
+///
+/// A project or conversation row holds one version, and an export presented it when its
+/// observation names the digest of the row. A subject whose observations carry no digest (an
+/// Artifact) falls back to the earliest retained export that observed it, and so does a record
+/// no retained export presented, which a restored row never is.
 async fn earliest_retained(
     transaction: &mut Transaction<'_, Postgres>,
     kind: &str,
     ids: &[Uuid],
 ) -> Result<BTreeMap<Uuid, Vec<Uuid>>, sqlx::Error> {
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "select (array_agg(o.export_id order by e.received_at, e.export_id))[1], o.subject_id
+        "select (array_agg(o.export_id order by (o.content_digest is not distinct from cur.digest) desc,
+                                                e.received_at, e.export_id))[1], o.subject_id
          from claude_archive.export_observations o
          join claude_archive.exports e on e.export_id = o.export_id
+         left join (select project_id as id, content_digest as digest
+                    from claude_archive.projects
+                    union all
+                    select conversation_id, content_digest
+                    from claude_archive.conversations) cur on cur.id = o.subject_id
          where o.subject_kind = $1 and o.subject_id = any($2)
          group by o.subject_id order by 1, 2",
     )
@@ -185,7 +197,7 @@ pub(crate) async fn reannounce(
     facts.extend(artifacts(transaction, deletion, &provider, &survivors.artifacts).await?);
     for (ordinal, fact) in facts.iter().enumerate() {
         let at = after(transaction, deletion.tombstoned_at, ordinal).await?;
-        ArchiveOutbox::enqueue_in(transaction, fact, at).await?;
+        ArchiveOutbox::enqueue_again_in(transaction, fact, at).await?;
     }
     Ok(facts.len())
 }

@@ -18,7 +18,7 @@ mod synthetic_import;
 
 use ratatoskr_ai_archive_contracts::{
     AiArchiveProvenance, AiArtifactAdded, AiArtifactUpdated, AiConversationAdded,
-    AiConversationUpdated, AiProjectAdded, AiProjectUpdated,
+    AiConversationUpdated, AiProjectAdded, AiProjectUpdated, AiText,
 };
 use ratatoskr_claude_archive::blob_protocol::{self, BlobRegistrationError};
 use ratatoskr_claude_archive::blob_store::scratch::{remove, temp_root};
@@ -317,15 +317,12 @@ async fn a_subject_a_retained_export_holds_is_re_announced_under_the_earliest_su
 #[tokio::test]
 async fn only_the_subjects_the_deleted_export_last_announced_are_re_announced() {
     let imported = import_three_exports("survivors-last-announced").await;
-    // The newest export changed the recipes project description, so it holds the latest fact of
-    // that project and of nothing else: the garden project, the conversation and the Artifact are
-    // still announced under the first export, which stays.
-    let [
-        (earliest_retained_export, earliest_retained),
-        _,
-        (deleted, _),
-    ] = imported.exports;
-    let _ = earliest_retained_export;
+    // Every export changed the recipes project description ("first", "second", "third"), so the
+    // newest export holds the latest fact of that project and of nothing else: the garden project,
+    // the conversation and the Artifact are still announced under the first export, which stays.
+    // The deletion puts the recipes project back to the description of the export before it, and
+    // that is the content the survivor fact carries, under the export that presented it.
+    let [_, (_, presenter), (deleted, _)] = imported.exports;
     imported.delete_export(deleted).await;
     let facts = imported.facts().await;
     let follow_up = after_the_tombstones(&facts);
@@ -335,8 +332,22 @@ async fn only_the_subjects_the_deleted_export_last_announced_are_re_announced() 
     let project = follow_up.first().expect("one fact follows the tombstone");
     assert_eq!(
         provenance_of(project).ai_archive_id.0,
-        earliest_retained,
-        "the earliest retained observing export"
+        presenter,
+        "the earliest retained export that presented the restored content"
+    );
+    let announced = project
+        .payload_as::<AiProjectUpdated>()
+        .expect("the payload decodes");
+    assert_eq!(
+        announced.project.description.as_ref().map(AiText::as_str),
+        Some("second"),
+        "the survivor fact carries the description of the retained export, not the deleted one's"
+    );
+    assert!(
+        !serde_json::to_string(&facts)
+            .expect("the facts serialize")
+            .contains("third"),
+        "no fact in the outbox carries the deleted export's description"
     );
 }
 

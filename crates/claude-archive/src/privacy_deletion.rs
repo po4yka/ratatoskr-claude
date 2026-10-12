@@ -10,6 +10,7 @@ mod execution;
 mod persistence;
 mod planning;
 mod planning_closure;
+mod restore;
 mod rows;
 mod tombstones;
 
@@ -227,8 +228,9 @@ pub enum PrivacyDeletionExecutionError {
     /// A tombstone envelope could not be built or stored.
     #[error("privacy deletion tombstone could not be recorded")]
     Tombstone(#[from] crate::ArchiveEventError),
-    /// A fact for a subject the deletion keeps could not be rebuilt or stored.
-    #[error("privacy deletion could not announce a retained subject again")]
+    /// A subject the deletion keeps could not be restored, or its fact could not be rebuilt or
+    /// stored.
+    #[error("privacy deletion could not restore or announce a retained subject again")]
     Reannounce(#[from] crate::ReparseError),
 }
 

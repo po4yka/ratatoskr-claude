@@ -17,6 +17,10 @@ use super::*;
 ///
 /// `every_foreign_key_into_deletion_roots_is_handled` compares this list with `pg_constraint`, so
 /// a new foreign key cannot reach production without deletion learning about it.
+///
+/// `entity_versions` has no foreign key (its `entity_id` names a project or a conversation by
+/// kind), so it is not listed: `restore_retained_versions` drops the versions of records that no
+/// longer exist.
 pub(super) const HANDLED_REFERENCES: &[(&str, &str)] = &[
     // Deleted with their export, import run or account by `delete_inventory_rows`.
     ("exports", "account_ref"),
@@ -132,13 +136,15 @@ impl PrivacyDeletionExecutor {
         delete_export_dependents(&mut transaction, request_id).await?;
         delete_inventory_rows(&mut transaction, request_id).await?;
         if tenant_scope {
-            for account_id in accounts {
+            for account_id in &accounts {
                 sqlx::query("delete from claude_archive.accounts where account_id = $1")
                     .bind(account_id)
                     .execute(&mut *transaction)
                     .await?;
             }
         }
+        // What a retained export presented is what the survivors hold before any fact is built.
+        super::restore::restore_retained_versions(&mut transaction, &accounts).await?;
         retain_blobs_still_referenced(&mut transaction, request_id).await?;
 
         let removed_at = WireTimestamp::now();
@@ -162,6 +168,8 @@ impl PrivacyDeletionExecutor {
             removed_at,
         )
         .await?;
+        super::tombstones::purge_facts_of_deleted_archives(&mut transaction, &request, &archives)
+            .await?;
         sqlx::query(
             "update claude_archive.privacy_deletion_requests
              set state = 'purging', error_code = null, evidence_blob_ref = $2,

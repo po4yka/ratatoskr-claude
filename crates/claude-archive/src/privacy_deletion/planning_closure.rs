@@ -155,11 +155,13 @@ async fn add_project_children(
     {
         closure.remove(DeletionItemKind::ProjectSource, id, None);
     }
+    // Every removed source, whether its project goes or stays, hands its blob to the decision.
+    let sources = closure.removed(DeletionItemKind::ProjectSource);
     for (id, blob) in id_blobs(
         transaction,
         "select source_id, blob_ref from claude_archive.project_sources
-         where project_id = any($1) and blob_ref is not null order by source_id",
-        &projects,
+         where source_id = any($1) and blob_ref is not null order by source_id",
+        &sources,
     )
     .await?
     {

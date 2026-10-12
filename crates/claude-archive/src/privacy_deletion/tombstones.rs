@@ -247,3 +247,32 @@ pub(super) async fn reannounce_survivors(
     };
     Ok(reannounce(transaction, &deletion, &survivors).await?)
 }
+
+/// Removes the facts of the deleted archives that stay in the outbox under a subject the deletion
+/// keeps.
+///
+/// A retained project, conversation or Artifact keeps its earlier facts, and the ones announced
+/// under a deleted archive carry the deleted export's content: they leave with it, after the
+/// survivors were announced again from the restored rows (XR-021 CONTRACTS.md R4-03). Tombstones
+/// stay, and the facts of subjects the request removes already left with their rows.
+pub(super) async fn purge_facts_of_deleted_archives(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &super::rows::DurableDeletionRequest,
+    archives: &[Uuid],
+) -> Result<u64, PrivacyDeletionExecutionError> {
+    if archives.is_empty() {
+        return Ok(0);
+    }
+    let archives: Vec<String> = archives.iter().map(Uuid::to_string).collect();
+    let removed = sqlx::query(
+        "delete from claude_archive.outbox_events
+         where tenant_ref = $1 and event_type like 'ai_archive.%'
+           and event_type <> 'ai_archive.subject.tombstoned.v1'
+           and (envelope #>> '{payload,import_provenance,ai_archive_id}') = any($2)",
+    )
+    .bind(&request.tenant_ref)
+    .bind(&archives)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(removed.rows_affected())
+}
