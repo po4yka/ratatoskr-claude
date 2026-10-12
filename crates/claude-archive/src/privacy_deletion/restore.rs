@@ -9,7 +9,9 @@
 //! retained export presented. It is then rebuilt from the versions the retained exports name,
 //! oldest export first, so the row ends as the newest retained export left it. The part history
 //! is written again with the importer's own rule, which makes the result equal to an import of
-//! only the retained exports.
+//! only the retained exports. A conversation the deleted exports also observed is rebuilt even
+//! when its row is current, because the part history is append-only: an export that is not
+//! cumulative leaves the row current and the history holding text only the deleted export wrote.
 
 use ratatoskr_identifiers::WireTimestamp;
 use sqlx::{Postgres, Transaction};
@@ -25,12 +27,14 @@ type Tx<'a> = Transaction<'a, Postgres>;
 /// One version a retained export presented: the export, the digest and the stored snapshot.
 type Held = (Uuid, String, serde_json::Value);
 
-/// Restores every surviving project and conversation that keeps content no retained export
-/// presented, refreshes the backup status of the projects of `accounts`, and drops the versions
-/// that no export names any longer. It runs in the row-removal transaction, after the scope's
-/// rows and observations are gone and before any survivor fact is built.
+/// Restores every surviving project that keeps content no retained export presented and every
+/// surviving conversation that a deleted export observed or that keeps such content, refreshes
+/// the backup status of the projects of `accounts`, and drops the versions that no export names
+/// any longer. It runs in the row-removal transaction, after the scope's rows and observations
+/// are gone and before any survivor fact is built.
 pub(super) async fn restore_retained_versions(
     tx: &mut Tx<'_>,
+    request_id: Uuid,
     accounts: &[Uuid],
 ) -> Result<(), PrivacyDeletionExecutionError> {
     // A record the deletion removed has no use for its versions.
@@ -50,7 +54,11 @@ pub(super) async fn restore_retained_versions(
             restore_project(tx, id, newest).await?;
         }
     }
-    for id in stale(tx, CONVERSATION).await? {
+    let mut conversations = stale(tx, CONVERSATION).await?;
+    conversations.extend(survivors(tx, request_id).await?);
+    conversations.sort_unstable();
+    conversations.dedup();
+    for id in conversations {
         let held = retained_versions(tx, CONVERSATION, id).await?;
         restore_conversation(tx, id, &held).await?;
     }
@@ -86,6 +94,20 @@ async fn stale(tx: &mut Tx<'_>, kind: &str) -> Result<Vec<Uuid>, sqlx::Error> {
          order by r.{key}"
     ))
     .bind(kind)
+    .fetch_all(&mut **tx)
+    .await
+}
+
+/// The conversations the request keeps because a retained export also observed them.
+async fn survivors(tx: &mut Tx<'_>, request_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select c.conversation_id from claude_archive.conversations c
+         join claude_archive.privacy_deletion_items i
+           on i.subject_id = c.conversation_id::text and i.item_kind = 'conversation'
+         where i.request_id = $1 and i.action = 'retain_evidenced'
+         order by c.conversation_id",
+    )
+    .bind(request_id)
     .fetch_all(&mut **tx)
     .await
 }
@@ -145,6 +167,11 @@ async fn restore_conversation(
     id: Uuid,
     held: &[Held],
 ) -> Result<(), PrivacyDeletionExecutionError> {
+    let Some((_, digest, snapshot)) = held.last() else {
+        // No retained export names a stored version, so there is nothing to rebuild from and
+        // the row keeps what it holds.
+        return Ok(());
+    };
     sqlx::query(
         "delete from claude_archive.content_parts
          where message_id in (select message_id from claude_archive.messages
@@ -162,9 +189,6 @@ async fn restore_conversation(
         let conversation: Conversation = serde_json::from_value(snapshot.clone())?;
         persist_messages(tx, *export_id, id, &conversation).await?;
     }
-    let Some((_, digest, snapshot)) = held.last() else {
-        return Ok(());
-    };
     let newest: Conversation = serde_json::from_value(snapshot.clone())?;
     let created = newest
         .created_at

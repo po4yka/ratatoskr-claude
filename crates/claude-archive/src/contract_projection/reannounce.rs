@@ -114,6 +114,13 @@ struct Announced {
     import_provenance: AiArchiveProvenance,
 }
 
+/// The provenance and conversation a fact was announced with.
+#[derive(serde::Deserialize)]
+struct AnnouncedConversation {
+    import_provenance: AiArchiveProvenance,
+    conversation: AiConversation,
+}
+
 /// Whether the latest fact of this subject names one of the archives being tombstoned.
 async fn announced_under_deleted(
     transaction: &mut Transaction<'_, Postgres>,
@@ -193,8 +200,11 @@ pub(crate) async fn reannounce(
     }
     let provider = claude()?;
     let mut facts = projects(transaction, deletion, &provider, &survivors.projects).await?;
-    facts.extend(conversations(transaction, deletion, &provider, &survivors.conversations).await?);
+    let (conversation_facts, stale) =
+        conversations(transaction, deletion, &provider, &survivors.conversations).await?;
+    facts.extend(conversation_facts);
     facts.extend(artifacts(transaction, deletion, &provider, &survivors.artifacts).await?);
+    drop_stale_conversation_facts(transaction, deletion.owner, &stale).await?;
     for (ordinal, fact) in facts.iter().enumerate() {
         let at = after(transaction, deletion.tombstoned_at, ordinal).await?;
         ArchiveOutbox::enqueue_again_in(transaction, fact, at).await?;
@@ -240,13 +250,21 @@ async fn projects(
     Ok(facts)
 }
 
+/// The conversation facts to announce again, and the conversations whose earlier facts carry
+/// content the restored row no longer has.
+///
+/// A conversation is announced again when its latest fact names a deleted archive, and also when
+/// that fact, under a retained archive, differs from the restored conversation: the content parts
+/// are an append-only history, so a fact built after the deleted export was imported can carry a
+/// part that only the deleted export wrote.
 async fn conversations(
     transaction: &mut Transaction<'_, Postgres>,
     deletion: &Deletion<'_>,
     provider: &AiProvider,
     ids: &[Uuid],
-) -> Result<Vec<ArchiveEventFact>, ReparseError> {
+) -> Result<(Vec<ArchiveEventFact>, Vec<String>), ReparseError> {
     let mut facts = Vec::new();
+    let mut stale = Vec::new();
     let mut omitted = Omitted::default();
     for (export_id, ids) in earliest_retained(transaction, "conversation", ids).await? {
         let import = RetainedImport::load(transaction, export_id, deletion).await?;
@@ -261,32 +279,72 @@ async fn conversations(
         .await?;
         for conversation in records {
             let aggregate = conversation.ai_conversation_id.as_entity_ref().to_string();
-            let event_types = [CONVERSATION_ADDED, CONVERSATION_UPDATED];
-            if announced_under_deleted(
+            let latest = latest_envelope(
                 transaction,
-                deletion,
+                deletion.owner,
                 "conversation",
                 &aggregate,
-                event_types,
+                [CONVERSATION_ADDED, CONVERSATION_UPDATED],
                 None,
             )
             .await?
-            {
-                let stamp = (
-                    conversation.parser_name.clone(),
-                    conversation.parser_version.clone(),
-                );
-                facts.push(ArchiveEventFact::ConversationUpdated(
-                    AiConversationUpdated {
-                        import_provenance: import.provenance(deletion.owner, provider, stamp),
-                        conversation,
-                        extensions: Extensions::new(),
-                    },
-                ));
+            .and_then(|envelope| {
+                serde_json::from_value::<AnnouncedConversation>(serde_json::Value::Object(
+                    envelope.payload,
+                ))
+                .ok()
+            });
+            let under_deleted = latest.as_ref().is_some_and(|fact| {
+                deletion
+                    .archives
+                    .contains(&fact.import_provenance.ai_archive_id.0)
+            });
+            let outdated = latest
+                .as_ref()
+                .is_some_and(|fact| fact.conversation != conversation);
+            if !(under_deleted || outdated) {
+                continue;
             }
+            if outdated {
+                stale.push(aggregate);
+            }
+            let stamp = (
+                conversation.parser_name.clone(),
+                conversation.parser_version.clone(),
+            );
+            facts.push(ArchiveEventFact::ConversationUpdated(
+                AiConversationUpdated {
+                    import_provenance: import.provenance(deletion.owner, provider, stamp),
+                    conversation,
+                    extensions: Extensions::new(),
+                },
+            ));
         }
     }
-    Ok(facts)
+    Ok((facts, stale))
+}
+
+/// Removes every earlier conversation fact of the aggregates whose latest fact no longer says what
+/// the restored conversation says; the fact announced again replaces them.
+async fn drop_stale_conversation_facts(
+    transaction: &mut Transaction<'_, Postgres>,
+    owner: TenantRef,
+    aggregates: &[String],
+) -> Result<(), ReparseError> {
+    if aggregates.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "delete from claude_archive.outbox_events
+         where tenant_ref = $1 and aggregate_type = 'conversation' and aggregate_id = any($2)
+           and event_type = any($3)",
+    )
+    .bind(owner.to_string())
+    .bind(aggregates)
+    .bind([CONVERSATION_ADDED, CONVERSATION_UPDATED].as_slice())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn artifacts(

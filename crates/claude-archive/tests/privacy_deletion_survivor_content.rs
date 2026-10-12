@@ -646,6 +646,52 @@ async fn deleting_two_exports_in_turn_restores_the_oldest_content() {
 }
 
 #[tokio::test]
+async fn a_part_only_the_deleted_export_appended_is_removed_even_when_the_row_is_current() {
+    // The newest export is not cumulative: it retitles the conversation and does not carry the
+    // part the second export appended. The row digest is the newest export's, which stays, and the
+    // part history still holds text only the deleted export wrote.
+    let mut third = export(1);
+    third["conversations"][0]["title"] = serde_json::json!(format!("Planting calendar {THIRD}"));
+    let series = import_series("survivor-non-cumulative", [export(1), export(2), third]).await;
+    let before = series.shared().await;
+    series.delete_export(series.exports[1]).await;
+
+    let after = series.shared().await;
+    let traces = series.tables_holding(SECOND).await;
+    let follow_up: Vec<String> = after_the_tombstones(&series.facts().await)
+        .iter()
+        .map(|fact| fact.event_type.to_wire())
+        .collect();
+    series.finish().await;
+
+    assert_eq!(
+        before.parts,
+        parts_through(2),
+        "the part history keeps what the second export appended"
+    );
+    assert!(
+        follow_up.contains(&"ai_archive.conversation.updated.v1".to_owned()),
+        "the retained export's fact carried the deleted part, so the conversation is announced \
+         again from the rebuilt rows: {follow_up:?}"
+    );
+    assert_eq!(
+        after.parts,
+        parts_through(1),
+        "the deleted export's part is gone though the row's own digest is a retained export's"
+    );
+    assert_eq!(
+        after.title,
+        Some(format!("Planting calendar {THIRD}")),
+        "the newest retained export's title stays"
+    );
+    assert_eq!(
+        traces,
+        Vec::<String>::new(),
+        "no trace of the deleted export's text"
+    );
+}
+
+#[tokio::test]
 async fn an_edit_repeated_by_a_retained_export_is_kept() {
     // The third export repeats everything the second one edited, so the content of the second
     // export survives its deletion.

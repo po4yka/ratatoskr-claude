@@ -24,6 +24,9 @@ Documentation: no failing test can precede it.
 - [x] 4.1 RED: `tests/privacy_deletion_survivor_content.rs` (its series fixture lives in `tests/survivor_series/mod.rs` to stay under the 850-line cap) adds `deleting_the_newest_export_restores_the_intermediate_project_conversation_and_parts`, `a_knowledge_file_only_the_deleted_export_presented_is_removed_with_its_blob`, `deleting_the_middle_export_keeps_the_newest_content`, `deleting_the_oldest_export_changes_no_content`, `deleting_two_exports_in_turn_restores_the_oldest_content`, `an_edit_repeated_by_a_retained_export_is_kept`, `tenant_deletion_leaves_no_snapshot` and `the_survivor_fact_carries_the_restored_content_under_the_earliest_retained_export`, and `tests/privacy_deletion_survivors.rs::only_the_subjects_the_deleted_export_last_announced_are_re_announced` asserts content. They fail because the retained rows and the survivor fact carry the deleted export's content.
 - [x] 4.2 GREEN: `privacy_deletion/restore.rs`, the source closure in `planning_closure.rs`, the removal of the deleted archive's facts under retained subjects, `reannounce.rs` naming the earliest retained presenter, `HANDLED_REFERENCES` and its `pg_constraint` test kept current.
 
+- [x] 4.3 RED: `tests/privacy_deletion_survivor_content.rs::a_part_only_the_deleted_export_appended_is_removed_even_when_the_row_is_current` imports a non-cumulative newest export; the part the deleted export appended stays because the row's digest is a retained export's.
+- [x] 4.4 GREEN: `restore.rs` rebuilds every conversation the request keeps because a retained export also observed it, and `reannounce.rs` announces a survivor again when its latest fact, under a retained archive, differs from the restored conversation, dropping the earlier facts that carried the deleted part.
+
 ## 5. Documentation (R3-19 style)
 
 Documentation: no failing test can precede it.

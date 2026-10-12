@@ -144,7 +144,7 @@ impl PrivacyDeletionExecutor {
             }
         }
         // What a retained export presented is what the survivors hold before any fact is built.
-        super::restore::restore_retained_versions(&mut transaction, &accounts).await?;
+        super::restore::restore_retained_versions(&mut transaction, request_id, &accounts).await?;
         retain_blobs_still_referenced(&mut transaction, request_id).await?;
 
         let removed_at = WireTimestamp::now();
