@@ -14,26 +14,18 @@
 )]
 
 mod cumulative;
+mod erasure_support;
 mod survivor_series;
-
-use std::time::Duration;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use async_nats::jetstream::consumer::{DeliverPolicy, pull};
-use futures_util::StreamExt as _;
-use ratatoskr_claude_archive::privacy_deletion::{
-    PrivacyDeletionPlanner, TenantDeletionPlanRequest,
-};
+use erasure_support::{COMMAND, Command, commands, edge_erases, named, plan_tenant};
 use ratatoskr_claude_archive::test_support::nats_url;
 use ratatoskr_claude_archive::{OutboxPublisher, PlatformUsers};
-use ratatoskr_event_envelope::{CommandEnvelope, EventEnvelope};
-use ratatoskr_operation_contracts::PlatformStreamErasureRequested;
 use sqlx::PgPool;
-use survivor_series::{Cumulative, export, import_series, import_three};
+use survivor_series::{export, import_series, import_three};
 use uuid::Uuid;
 
-const COMMAND: &str = "platform.stream_erasure.requested.v1";
 const FACT_TYPES: &str =
     "event_type like 'ai_archive.%' and event_type <> 'ai_archive.subject.tombstoned.v1'";
 const OTHER_USER: &str = "018f0000-0000-7000-8000-0000000000d2";
@@ -48,17 +40,6 @@ struct Fact {
     aggregate: String,
     owner: Option<String>,
     sequences: Vec<u64>,
-}
-
-/// One erasure command as the outbox holds it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Command {
-    owner: String,
-    producer: String,
-    request_ref: String,
-    correlation: String,
-    sequences: Vec<u64>,
-    id: Uuid,
 }
 
 /// Marks every fact row published, at a sequence of its own, and returns what each row holds.
@@ -100,59 +81,6 @@ async fn facts(pool: &PgPool) -> BTreeMap<Uuid, Fact> {
             )
         })
         .collect()
-}
-
-async fn commands(pool: &PgPool) -> Vec<Command> {
-    let rows: Vec<(Uuid, serde_json::Value, String)> = sqlx::query_as(
-        "select event_id, envelope, aggregate_type from claude_archive.outbox_events
-         where event_type = $1 order by occurred_at, event_id",
-    )
-    .bind(COMMAND)
-    .fetch_all(pool)
-    .await
-    .expect("the commands are readable");
-    rows.into_iter()
-        .map(|(id, raw, aggregate_type)| {
-            assert_eq!(aggregate_type, "privacy_request");
-            let envelope: CommandEnvelope =
-                serde_json::from_value(raw).expect("a complete command envelope");
-            assert_eq!(envelope.command_id.0, id, "the envelope carries the row id");
-            assert_eq!(envelope.command_type.to_wire(), COMMAND);
-            let payload = envelope
-                .payload_as::<PlatformStreamErasureRequested>()
-                .expect("a valid erasure request");
-            assert_eq!(
-                envelope.tenant_id,
-                Some(payload.owner),
-                "the envelope tenant is the payload owner"
-            );
-            assert_eq!(
-                envelope.aggregate_id, payload.request_ref,
-                "the aggregate is the deletion request"
-            );
-            Command {
-                owner: payload.owner.to_string(),
-                producer: envelope.producer.as_str().to_owned(),
-                request_ref: payload.request_ref.to_string(),
-                correlation: envelope.correlation_id.to_string(),
-                sequences: payload.stream_sequences,
-                id,
-            }
-        })
-        .collect()
-}
-
-/// Every sequence a set of commands names, per owner.
-fn named(commands: &[Command]) -> BTreeMap<String, BTreeSet<u64>> {
-    commands
-        .iter()
-        .fold(BTreeMap::new(), |mut grouped, command| {
-            grouped
-                .entry(command.owner.clone())
-                .or_default()
-                .extend(command.sequences.iter().copied());
-            grouped
-        })
 }
 
 fn sequence_of(
@@ -263,19 +191,46 @@ async fn the_row_removal_asks_for_the_erasure_of_every_published_fact_it_deletes
     );
 }
 
-async fn plan_tenant(imported: &Cumulative) -> Uuid {
-    let request = Uuid::now_v7();
-    PrivacyDeletionPlanner::new(imported.series.pool().clone())
-        .plan_tenant(&TenantDeletionPlanRequest {
-            tenant_ref: imported.series.account.to_string(),
-            account_id: imported.series.account,
-            request_id: request,
-            request_key: format!("erasure-{request}"),
-            correlation_id: format!("privacy-delete:{request}"),
-        })
-        .await
-        .expect("the tenant deletion is planned");
-    request
+#[tokio::test]
+async fn a_fact_published_under_two_sequences_is_named_by_one_command_with_both() {
+    // XR-021 CONTRACTS.md R6-03 rule 1: a republish after the duplicate window leaves a second
+    // stream copy under a second sequence, and the row records both. Phase A removes the row and
+    // the one command for its owner names both copies.
+    let imported = import_three("erasure-two-copies").await;
+    let pool = imported.series.pool();
+    let published = publish_all(pool).await;
+    let (republished, first) = published
+        .iter()
+        .find_map(|(id, fact)| Some((*id, *fact.sequences.first()?)))
+        .expect("a fact was published");
+    let second = first + 5_000;
+    sqlx::query(
+        "update claude_archive.outbox_events
+         set published_stream_seqs = published_stream_seqs || $2::bigint where event_id = $1",
+    )
+    .bind(republished)
+    .bind(i64::try_from(second).expect("a sequence fits"))
+    .execute(pool)
+    .await
+    .expect("the second copy is recorded");
+    let request = plan_tenant(&imported).await;
+    imported.execute(request).await;
+    let issued = commands(pool).await;
+    imported.finish().await;
+
+    assert_well_formed(&issued);
+    let owner = format!("user:{}", cumulative::USER);
+    let for_owner: Vec<&Command> = issued
+        .iter()
+        .filter(|command| command.owner == owner)
+        .collect();
+    assert_eq!(for_owner.len(), 1, "one command for the owner: {issued:?}");
+    assert!(
+        for_owner.iter().all(
+            |command| command.sequences.contains(&first) && command.sequences.contains(&second)
+        ),
+        "the command names both copies of the republished fact: {issued:?}"
+    );
 }
 
 #[tokio::test]
@@ -532,74 +487,6 @@ async fn a_later_deletion_keeps_an_erasure_request_nobody_published_yet() {
             command.id
         );
     }
-}
-
-/// The content-bearing fact subjects Edge may erase from (XR-021 CONTRACTS.md R5-12 rule 4).
-const ERASABLE_SUBJECTS: [&str; 7] = [
-    "evt.ai_archive.archive.imported.v1",
-    "evt.ai_archive.conversation.added.v1",
-    "evt.ai_archive.conversation.updated.v1",
-    "evt.ai_archive.project.added.v1",
-    "evt.ai_archive.project.updated.v1",
-    "evt.ai_archive.artifact.added.v1",
-    "evt.ai_archive.artifact.updated.v1",
-];
-
-/// A stand-in for the Edge handler: it reads each named message, erases it only when its subject,
-/// producer and tenant are the command's, and reports how many it erased.
-async fn edge_erases(
-    commands: &async_nats::jetstream::stream::Stream,
-    events: &async_nats::jetstream::stream::Stream,
-    ids: &BTreeSet<Uuid>,
-) -> usize {
-    let consumer = commands
-        .create_consumer(pull::Config {
-            filter_subject: "cmd.platform.stream_erasure.requested.v1".to_owned(),
-            deliver_policy: DeliverPolicy::All,
-            ..Default::default()
-        })
-        .await
-        .expect("an ephemeral consumer attaches");
-    let mut batch = consumer
-        .fetch()
-        .max_messages(1000)
-        .expires(Duration::from_secs(3))
-        .messages()
-        .await
-        .expect("the batch opens");
-    let mut erased = 0;
-    while let Some(message) = batch.next().await {
-        let message = message.expect("the delivery is readable");
-        let named = message
-            .headers
-            .as_ref()
-            .and_then(|headers| headers.get("Nats-Msg-Id"))
-            .and_then(|id| Uuid::parse_str(id.as_ref()).ok());
-        if !named.is_some_and(|id| ids.contains(&id)) {
-            continue;
-        }
-        let command = CommandEnvelope::from_json(&message.payload).expect("a command envelope");
-        let request = command
-            .payload_as::<PlatformStreamErasureRequested>()
-            .expect("a valid erasure request");
-        for sequence in request.stream_sequences {
-            let Ok(stored) = events.get_raw_message(sequence).await else {
-                continue;
-            };
-            let fact = EventEnvelope::from_json(&stored.payload).expect("a fact envelope");
-            if ERASABLE_SUBJECTS.contains(&stored.subject.as_str())
-                && fact.producer == command.producer
-                && fact.tenant_id == Some(request.owner)
-            {
-                events
-                    .delete_message(sequence)
-                    .await
-                    .expect("the message is erased");
-                erased += 1;
-            }
-        }
-    }
-    erased
 }
 
 /// The two streams of the deployment on the test broker.

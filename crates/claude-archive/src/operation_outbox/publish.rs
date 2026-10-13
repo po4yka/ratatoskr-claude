@@ -1,30 +1,55 @@
 //! The publication pass: which rows a pass offers, how each is published, and how it is marked.
+//!
+//! The first publication of a row is one short transaction that locks the row, so a deletion that
+//! meets the lock waits for the pump and a row deleted before the lock is never published (XR-021
+//! CONTRACTS.md R6-03 rule 2). The resend of a tombstone that was already published takes no lock.
 
-use ratatoskr_event_envelope::{CommandEnvelope, EventEnvelope};
 use sqlx::Row as _;
 use uuid::Uuid;
 
+use ratatoskr_event_envelope::{CommandEnvelope, EventEnvelope};
+
 use super::{
     BATCH_SIZE, HEADER_HEADROOM_BYTES, MARK_LOST_METRIC, OutboxError, OutboxPublisher,
-    PAYLOAD_TOO_LARGE, PENDING_SQL, RESEND_SQL, STREAM_ERASURE_TYPE, UNDELIVERABLE_METRIC,
-    subject_for_event_type,
+    PAYLOAD_TOO_LARGE, PENDING_SQL, PublishPause, RESEND_SQL, STREAM_ERASURE_TYPE,
+    UNDELIVERABLE_METRIC, subject_for_event_type,
 };
+
+/// Locks the row of a first publication, or finds nothing: the row was deleted, is held by a
+/// deletion, or was published. The pump never waits on a lock, so it cannot take part in a
+/// deadlock; the deletion waits for the pump instead.
+const LOCK_SQL: &str = "select tenant_ref from claude_archive.outbox_events
+     where event_id = $1 and published_at is null and undeliverable_at is null
+     for update skip locked";
+
+/// What one first publication came to.
+enum FirstPublication {
+    /// The broker acknowledged the row and the mark committed.
+    Published,
+    /// The row was gone or held by a deletion, and nothing was published.
+    Skipped,
+    /// The broker did not acknowledge the row; the refusal was recorded.
+    Refused,
+}
 
 impl OutboxPublisher {
     /// Makes one bounded attempt to publish pending events through an open `JetStream` context.
     ///
     /// A refused row stays unpublished, counts the attempt, records a safe error class and backs
-    /// off, and the rows behind it are still offered in the same pass.
+    /// off, and the rows behind it are still offered in the same pass. A pass first asks Edge to
+    /// erase any copy it carried from a failed commit whose row has since been deleted.
     ///
     /// # Errors
     ///
     /// Returns [`OutboxError::UnknownEventType`] or [`OutboxError::EnvelopeMismatch`] for a row
     /// the pump must never skip, [`OutboxError::Broker`] after a pass in which any publish was
-    /// refused, and [`OutboxError::Database`] when the queue cannot be read or marked.
+    /// refused, [`OutboxError::MarkLost`] when an acknowledged row could not be marked, and
+    /// [`OutboxError::Database`] when the queue cannot be read or marked.
     pub async fn publish_pending_with(
         &self,
         jetstream: &async_nats::jetstream::Context,
     ) -> Result<usize, OutboxError> {
+        self.erase_orphaned_copies().await?;
         let pending = sqlx::query(PENDING_SQL)
             .bind(BATCH_SIZE)
             .fetch_all(&self.pool)
@@ -35,6 +60,9 @@ impl OutboxPublisher {
             .fetch_all(&self.pool)
             .await
             .map_err(OutboxError::Database)?;
+        if let Some(probe) = &self.probe {
+            probe.park(PublishPause::AfterCandidates).await;
+        }
         let rows = pending
             .into_iter()
             .map(|row| (row, false))
@@ -63,44 +91,125 @@ impl OutboxPublisher {
                 if resend {
                     // It fitted when it was first published, so the broker limit shrank. Treat it
                     // as a refusal: the resend backs off instead of coming back every pass.
-                    self.record_refusal(event_id, PAYLOAD_TOO_LARGE).await?;
+                    self.record_refusal(&self.pool, event_id, PAYLOAD_TOO_LARGE)
+                        .await?;
                     refused += 1;
                 } else {
                     self.mark_undeliverable(event_id).await?;
                 }
                 continue;
             }
-            let mut headers = async_nats::HeaderMap::new();
-            headers.insert("Nats-Msg-Id", event_id.to_string());
-            let acknowledged = match jetstream
-                .publish_with_headers(subject, headers, body.into())
-                .await
-            {
-                Ok(acknowledgement) => acknowledgement
-                    .await
-                    .map(|acknowledged| acknowledged.sequence)
-                    .map_err(|_| "ack_failed"),
-                Err(_) => Err("publish_failed"),
+            let outcome = if resend {
+                self.resend_published(jetstream, event_id, subject, body)
+                    .await?
+            } else {
+                self.publish_first(jetstream, event_id, &event_type, subject, body)
+                    .await?
             };
-            match acknowledged {
-                Ok(sequence) => {
-                    if resend {
-                        self.mark_resent(event_id).await?;
-                    } else {
-                        self.mark_published(event_id, sequence).await?;
-                    }
-                    published += 1;
-                }
-                Err(class) => {
-                    self.record_refusal(event_id, class).await?;
-                    refused += 1;
-                }
+            match outcome {
+                FirstPublication::Published => published += 1,
+                FirstPublication::Skipped => {}
+                FirstPublication::Refused => refused += 1,
             }
         }
         if refused > 0 {
             return Err(OutboxError::broker_refused());
         }
         Ok(published)
+    }
+
+    /// Publishes a tombstone again: it is already published, no sequence is recorded for a resend
+    /// and no deletion removes it before Knowledge acknowledged it, so the row takes no lock.
+    async fn resend_published(
+        &self,
+        jetstream: &async_nats::jetstream::Context,
+        event_id: Uuid,
+        subject: &'static str,
+        body: Vec<u8>,
+    ) -> Result<FirstPublication, OutboxError> {
+        match publish_one(jetstream, event_id, subject, body).await {
+            Ok(_) => {
+                self.mark_resent(event_id).await?;
+                Ok(FirstPublication::Published)
+            }
+            Err(class) => {
+                self.record_refusal(&self.pool, event_id, class).await?;
+                Ok(FirstPublication::Refused)
+            }
+        }
+    }
+
+    /// The first publication of one row, as one short transaction (R6-03 rule 2): lock the row,
+    /// publish, await the acknowledgement, mark, commit.
+    ///
+    /// One pool connection is held while the publish is in flight, for at most
+    /// [`super::PUBLISH_REQUEST_TIMEOUT`]. A pass is sequential, so the pump never holds more than
+    /// one for this, and the pool of the service is sized for that beside its other workers.
+    async fn publish_first(
+        &self,
+        jetstream: &async_nats::jetstream::Context,
+        event_id: Uuid,
+        event_type: &str,
+        subject: &'static str,
+        body: Vec<u8>,
+    ) -> Result<FirstPublication, OutboxError> {
+        let mut transaction = self.pool.begin().await.map_err(OutboxError::Database)?;
+        let locked: Option<Option<String>> = sqlx::query_scalar(LOCK_SQL)
+            .bind(event_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(OutboxError::Database)?;
+        let Some(owner) = locked else {
+            return Ok(FirstPublication::Skipped);
+        };
+        let sequence = match publish_one(jetstream, event_id, subject, body).await {
+            Ok(sequence) => sequence,
+            Err(class) => {
+                self.record_refusal(&mut *transaction, event_id, class)
+                    .await?;
+                transaction.commit().await.map_err(OutboxError::Database)?;
+                return Ok(FirstPublication::Refused);
+            }
+        };
+        if let Some(probe) = &self.probe {
+            probe.park(PublishPause::AfterPubAck).await;
+        }
+        let sequences = self.carried.with_new(event_id, sequence);
+        let marked = self
+            .mark_and_commit(transaction, event_id, &sequences)
+            .await;
+        match marked {
+            Ok(()) => {
+                self.carried.forget(event_id);
+                Ok(FirstPublication::Published)
+            }
+            Err(error) => {
+                self.carried
+                    .keep(event_id, event_type, owner.as_deref(), &sequences);
+                Err(error)
+            }
+        }
+    }
+
+    /// Marks the locked row and commits, or fails the commit on request of the test seam.
+    async fn mark_and_commit(
+        &self,
+        mut transaction: sqlx::Transaction<'_, sqlx::Postgres>,
+        event_id: Uuid,
+        sequences: &[i64],
+    ) -> Result<(), OutboxError> {
+        if self
+            .probe
+            .as_ref()
+            .is_some_and(|probe| probe.take_commit_fault())
+        {
+            return Err(OutboxError::Database(sqlx::Error::Io(
+                std::io::Error::other("injected commit failure"),
+            )));
+        }
+        self.mark_published(&mut transaction, event_id, sequences)
+            .await?;
+        transaction.commit().await.map_err(OutboxError::Database)
     }
 
     /// Retires a row whose body is larger than the broker accepts: no retry can ever succeed, so
@@ -125,23 +234,36 @@ impl OutboxPublisher {
         Ok(())
     }
 
-    /// Marks a row published after the broker acknowledged it, and records the stream sequence
-    /// of that acknowledgement (a duplicate acknowledgement carries the original sequence). A
-    /// tombstone is also scheduled for its first resend, one interval later.
-    async fn mark_published(&self, event_id: Uuid, sequence: u64) -> Result<(), OutboxError> {
+    /// Marks a locked row published after the broker acknowledged it, and records every stream
+    /// sequence it holds: the ones already on the row, the ones carried from a commit that failed
+    /// and the new one, ascending and without duplicates (a duplicate acknowledgement carries the
+    /// original sequence and adds nothing). A tombstone is also scheduled for its first resend,
+    /// one interval later.
+    ///
+    /// The times are `clock_timestamp()`, not `now()`: the transaction has been open since the row
+    /// was locked, and `now()` would be the instant the publish began.
+    ///
+    /// The update must affect exactly one row. Anything else means the broker holds a copy that no
+    /// row records, so it is counted and returned, never ignored (R6-03 rule 2).
+    async fn mark_published(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        event_id: Uuid,
+        sequences: &[i64],
+    ) -> Result<(), OutboxError> {
         let marked = sqlx::query(
             "update claude_archive.outbox_events
-             set published_at = now(), last_error = null,
+             set published_at = clock_timestamp(), last_error = null,
                  published_stream_seqs = (select coalesce(array_agg(distinct s order by s), '{}')
-                                          from unnest(published_stream_seqs || $3::bigint) s),
+                                          from unnest(published_stream_seqs || $3::bigint[]) s),
                  next_resend_at = case when event_type = 'ai_archive.subject.tombstoned.v1'
-                                       then now() + make_interval(secs => $2) end
+                                       then clock_timestamp() + make_interval(secs => $2) end
              where event_id = $1 and published_at is null",
         )
         .bind(event_id)
         .bind(self.resend.after.as_secs_f64())
-        .bind(i64::try_from(sequence).map_err(|_| OutboxError::EnvelopeMismatch)?)
-        .execute(&self.pool)
+        .bind(sequences)
+        .execute(&mut **transaction)
         .await
         .map_err(OutboxError::Database)?;
         if marked.rows_affected() == 1 {
@@ -176,22 +298,48 @@ impl OutboxPublisher {
     }
 
     /// Counts the refused attempt and delays the row, doubling from two seconds up to five
-    /// minutes, so a failing head row cannot starve the rows behind it.
-    async fn record_refusal(&self, event_id: Uuid, class: &str) -> Result<(), OutboxError> {
+    /// minutes, so a failing head row cannot starve the rows behind it. A first publication
+    /// records it inside the transaction that holds the row, because a second connection would
+    /// wait on that lock forever. The delay starts at `clock_timestamp()`: `now()` is the start of
+    /// that transaction, which may be a whole publish timeout ago.
+    async fn record_refusal<'e>(
+        &self,
+        executor: impl sqlx::PgExecutor<'e>,
+        event_id: Uuid,
+        class: &str,
+    ) -> Result<(), OutboxError> {
         sqlx::query(
             "update claude_archive.outbox_events
              set attempt_count = attempt_count + 1, last_error = $2,
-                 next_attempt_at = now()
+                 next_attempt_at = clock_timestamp()
                      + least(300, 2 * power(2, least(attempt_count, 7))) * interval '1 second'
              where event_id = $1",
         )
         .bind(event_id)
         .bind(class)
-        .execute(&self.pool)
+        .execute(executor)
         .await
         .map_err(OutboxError::Database)?;
         Ok(())
     }
+}
+
+/// Publishes one stored body with `Nats-Msg-Id` set to the row's event id and returns the stream
+/// sequence of the acknowledgement, or the safe class of the failure.
+async fn publish_one(
+    jetstream: &async_nats::jetstream::Context,
+    event_id: Uuid,
+    subject: &'static str,
+    body: Vec<u8>,
+) -> Result<i64, &'static str> {
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert("Nats-Msg-Id", event_id.to_string());
+    let acknowledgement = jetstream
+        .publish_with_headers(subject, headers, body.into())
+        .await
+        .map_err(|_| "publish_failed")?;
+    let acknowledged = acknowledgement.await.map_err(|_| "ack_failed")?;
+    i64::try_from(acknowledged.sequence).map_err(|_| "ack_failed")
 }
 
 /// The bytes a stored row is published as: its complete envelope, which must be the envelope of
@@ -259,9 +407,20 @@ mod mark_tests {
         let recorder = metrics();
         let db = TestDatabase::create().await.expect("a disposable database");
         let publisher = OutboxPublisher::new(db.database.pool().clone());
-        let deleted = publisher.mark_published(Uuid::now_v7(), 7).await;
+        let mut transaction = db
+            .database
+            .pool()
+            .begin()
+            .await
+            .expect("a transaction opens");
+        let deleted = publisher
+            .mark_published(&mut transaction, Uuid::now_v7(), &[7])
+            .await;
         let already = insert_row(&db, true).await;
-        let twice = publisher.mark_published(already, 8).await;
+        let twice = publisher
+            .mark_published(&mut transaction, already, &[8])
+            .await;
+        transaction.rollback().await.expect("the transaction ends");
         let exposition = recorder.render();
         db.cleanup().await.expect("cleanup succeeds");
 

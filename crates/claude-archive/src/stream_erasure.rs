@@ -4,10 +4,11 @@
 //! A conversation, project or Artifact fact carries message text on the wire and stays in
 //! `ratatoskr_events` for up to seven days after this service removed its own outbox row, and no
 //! producer may remove a stream message. Edge is the only identity that may, on request. The pump
-//! records the stream sequence of every row it publishes; every code path that deletes a published
-//! fact row from the outbox goes through [`drop_published_fact_rows`], which reads those sequences
-//! before the delete and enqueues the request in the same transaction. The request is published
-//! like any other row and Edge erases eventually: a deletion does not wait for it.
+//! records the stream sequence of every acknowledgement it receives for a row; every code path that
+//! deletes a published fact row from the outbox goes through [`drop_published_fact_rows`], which
+//! reads those sequences in the statement that deletes the rows and enqueues the request in the
+//! same transaction. The request is published like any other row and Edge erases eventually: a
+//! deletion does not wait for it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,6 +32,11 @@ const CONTENT_BEARING: [&str; 7] = [
     "ai_archive.artifact.added.v1",
     "ai_archive.artifact.updated.v1",
 ];
+
+/// Whether a row of this type carries content the stream copy of which Edge may erase.
+pub(crate) fn is_content_bearing(event_type: &str) -> bool {
+    CONTENT_BEARING.contains(&event_type)
+}
 
 /// The deletion request on whose behalf published fact rows are removed.
 #[derive(Debug, Clone)]
@@ -60,7 +66,10 @@ impl ErasureRequest {
 /// Deletes these outbox rows, and asks Edge to erase the stream copy of every published
 /// content-bearing fact among them.
 ///
-/// The sequences are read before the rows are deleted and grouped by the owner the row's envelope
+/// The sequences come back from the statement that deletes the rows (XR-021 CONTRACTS.md R6-03
+/// rule 3). A pump that holds one of the rows for its first publication holds its row lock, so the
+/// statement waits for the pump to commit and then deletes the committed version, whose array
+/// names the copy that was just acknowledged. They are grouped by the owner the row's envelope
 /// names; each owner gets ascending commands of at most 500 sequences, enqueued in the same
 /// transaction. A row that was never published has no sequence and needs nothing. Returns how many
 /// rows were deleted.
@@ -76,16 +85,17 @@ pub(crate) async fn drop_published_fact_rows(
     if event_ids.is_empty() {
         return Ok(0);
     }
-    let rows: Vec<(String, Option<String>, Vec<i64>)> = sqlx::query_as(
-        "select event_type, tenant_ref, published_stream_seqs
-         from claude_archive.outbox_events where event_id = any($1)",
+    let removed: Vec<(String, Option<String>, Vec<i64>)> = sqlx::query_as(
+        "delete from claude_archive.outbox_events where event_id = any($1)
+         returning event_type, tenant_ref, published_stream_seqs",
     )
     .bind(event_ids)
     .fetch_all(&mut **transaction)
     .await?;
+    let deleted = u64::try_from(removed.len()).unwrap_or(u64::MAX);
     let mut by_owner: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
-    for (event_type, owner, sequences) in rows {
-        let (true, Some(owner)) = (CONTENT_BEARING.contains(&event_type.as_str()), owner) else {
+    for (event_type, owner, sequences) in removed {
+        let (true, Some(owner)) = (is_content_bearing(&event_type), owner) else {
             continue;
         };
         by_owner.entry(owner).or_default().extend(
@@ -102,14 +112,10 @@ pub(crate) async fn drop_published_fact_rows(
             enqueue_command(transaction, request, owner, chunk).await?;
         }
     }
-    let removed = sqlx::query("delete from claude_archive.outbox_events where event_id = any($1)")
-        .bind(event_ids)
-        .execute(&mut **transaction)
-        .await?;
-    Ok(removed.rows_affected())
+    Ok(deleted)
 }
 
-async fn enqueue_command(
+pub(crate) async fn enqueue_command(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &ErasureRequest,
     owner: TenantRef,

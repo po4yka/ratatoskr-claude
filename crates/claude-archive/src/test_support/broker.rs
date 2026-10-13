@@ -308,4 +308,36 @@ impl Broker {
         client.drain().await?;
         Ok(())
     }
+
+    /// Creates the events stream with the given duplicate window and the commands stream, shaped
+    /// like the two streams of the deployment, so a test can watch the pump publish a fact and an
+    /// erasure request.
+    ///
+    /// # Errors
+    ///
+    /// When the setup user cannot connect or a stream cannot be created.
+    pub async fn provision_streams(
+        &self,
+        duplicate_window: Duration,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let client = self.admin_client().await?;
+        let jetstream = async_nats::jetstream::new(client.clone());
+        jetstream
+            .get_or_create_stream(async_nats::jetstream::stream::Config {
+                name: "ratatoskr_events".to_owned(),
+                subjects: vec!["evt.>".to_owned()],
+                duplicate_window,
+                ..Default::default()
+            })
+            .await?;
+        jetstream
+            .get_or_create_stream(async_nats::jetstream::stream::Config {
+                name: "ratatoskr_commands".to_owned(),
+                subjects: vec!["cmd.>".to_owned()],
+                ..Default::default()
+            })
+            .await?;
+        client.drain().await?;
+        Ok(())
+    }
 }

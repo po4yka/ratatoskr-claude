@@ -12,7 +12,11 @@ use std::time::Duration;
 use sqlx::Row as _;
 use uuid::Uuid;
 
+mod carry;
 mod publish;
+mod publish_probe;
+
+pub use publish_probe::{PublishPause, PublishProbe};
 
 /// The only command type this service publishes: the request that Edge erase messages it published
 /// from the events stream (XR-021 CONTRACTS.md R5-12). Its outbox row stores a command envelope.
@@ -27,6 +31,11 @@ const INBOX_PREFIX: &str = "_INBOX_claude";
 const BATCH_SIZE: i64 = 32;
 /// A background retry must not wait forever for an unavailable broker.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// The request timeout of the `JetStream` context, which is how long the pump waits for a publish
+/// to be acknowledged (XR-021 CONTRACTS.md R6-03 rule 2). A first publication holds one row lock
+/// and one pool connection while the publish is in flight, so this is also the longest a deletion
+/// waits for the pump and the longest the pump holds a connection.
+const PUBLISH_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long [`OutboxPublisher::close`] waits for the client to report that it is closed.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Room the broker needs beside the body for the subject and headers of one message.
@@ -153,6 +162,8 @@ pub struct OutboxPublisher {
     resend: crate::deletion_ack::ResendPolicy,
     connection: Arc<tokio::sync::Mutex<Option<HeldConnection>>>,
     failing: Arc<AtomicBool>,
+    carried: carry::CarriedCopies,
+    probe: Option<Arc<PublishProbe>>,
 }
 
 impl OutboxPublisher {
@@ -164,7 +175,17 @@ impl OutboxPublisher {
             resend: crate::deletion_ack::ResendPolicy::default(),
             connection: Arc::new(tokio::sync::Mutex::new(None)),
             failing: Arc::new(AtomicBool::new(false)),
+            carried: carry::CarriedCopies::default(),
+            probe: None,
         }
+    }
+
+    /// Installs the test seam that holds the pass at a named point and fails one commit (XR-021
+    /// CONTRACTS.md R6-03 rule 7). Production never calls it.
+    #[must_use]
+    pub fn with_publish_probe(mut self, probe: Arc<PublishProbe>) -> Self {
+        self.probe = Some(probe);
+        self
     }
 
     /// Sets how long a published tombstone waits for Knowledge's acknowledgement before the pump
@@ -251,6 +272,9 @@ impl OutboxPublisher {
         endpoint: &str,
         nkey_seed_path: &std::path::Path,
     ) -> Result<usize, OutboxError> {
+        // A carried copy whose row was deleted is erased by a command, which then counts as
+        // pending, so this runs before the check and needs no broker (R6-03 rule 4).
+        self.erase_orphaned_copies().await?;
         let pending: bool = sqlx::query_scalar(HAS_PENDING_SQL)
             .fetch_one(&self.pool)
             .await
@@ -300,7 +324,9 @@ impl OutboxPublisher {
             .await
             .map_err(|_| OutboxError::BrokerTimeout)?
             .map_err(OutboxError::broker)?;
-        let jetstream = async_nats::jetstream::new(client.clone());
+        let jetstream = async_nats::jetstream::ContextBuilder::new()
+            .timeout(PUBLISH_REQUEST_TIMEOUT)
+            .build(client.clone());
         *held = Some(HeldConnection {
             client,
             jetstream: jetstream.clone(),
@@ -332,6 +358,9 @@ pub enum OutboxError {
     /// A durable payload could not be encoded for the bus.
     #[error("the archive event payload could not be encoded")]
     Encode(#[source] serde_json::Error),
+    /// An erasure request for a copy no deletion knew about could not be formed or stored.
+    #[error("the archive event outbox could not enqueue a stream erasure request")]
+    Erasure(#[source] crate::ArchiveEventError),
     /// The mark of an acknowledged row did not affect exactly one row.
     #[error("the outbox row of an acknowledged publish was not marked")]
     MarkLost,
