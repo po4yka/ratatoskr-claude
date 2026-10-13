@@ -422,7 +422,9 @@ impl OutboxPublisher {
     async fn mark_published(&self, event_id: Uuid, sequence: u64) -> Result<(), OutboxError> {
         sqlx::query(
             "update claude_archive.outbox_events
-             set published_at = now(), last_error = null, published_stream_seq = $3,
+             set published_at = now(), last_error = null,
+                 published_stream_seqs = (select coalesce(array_agg(distinct s order by s), '{}')
+                                          from unnest(published_stream_seqs || $3::bigint) s),
                  next_resend_at = case when event_type = 'ai_archive.subject.tombstoned.v1'
                                        then now() + make_interval(secs => $2) end
              where event_id = $1 and published_at is null",

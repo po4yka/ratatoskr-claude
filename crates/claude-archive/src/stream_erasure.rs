@@ -76,25 +76,24 @@ pub(crate) async fn drop_published_fact_rows(
     if event_ids.is_empty() {
         return Ok(0);
     }
-    let rows: Vec<(String, Option<String>, Option<i64>)> = sqlx::query_as(
-        "select event_type, tenant_ref, published_stream_seq
+    let rows: Vec<(String, Option<String>, Vec<i64>)> = sqlx::query_as(
+        "select event_type, tenant_ref, published_stream_seqs
          from claude_archive.outbox_events where event_id = any($1)",
     )
     .bind(event_ids)
     .fetch_all(&mut **transaction)
     .await?;
     let mut by_owner: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
-    for (event_type, owner, sequence) in rows {
-        let (true, Some(owner), Some(sequence)) = (
-            CONTENT_BEARING.contains(&event_type.as_str()),
-            owner,
-            sequence.and_then(|sequence| u64::try_from(sequence).ok()),
-        ) else {
+    for (event_type, owner, sequences) in rows {
+        let (true, Some(owner)) = (CONTENT_BEARING.contains(&event_type.as_str()), owner) else {
             continue;
         };
-        if sequence > 0 {
-            by_owner.entry(owner).or_default().insert(sequence);
-        }
+        by_owner.entry(owner).or_default().extend(
+            sequences
+                .into_iter()
+                .filter_map(|sequence| u64::try_from(sequence).ok())
+                .filter(|sequence| *sequence > 0),
+        );
     }
     for (owner, sequences) in by_owner {
         let owner = TenantRef::parse(&owner).map_err(|_| ArchiveEventError::Identifier)?;

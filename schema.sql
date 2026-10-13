@@ -816,7 +816,7 @@ create table claude_archive.outbox_events (
     next_attempt_at timestamptz,
     last_error      text,
     undeliverable_at timestamptz,
-    published_stream_seq bigint,
+    published_stream_seqs bigint[] not null default '{}',
     acknowledged_at timestamptz,
     ack_outcome     text,
     resend_count    integer     not null default 0,
@@ -847,8 +847,8 @@ comment on table claude_archive.outbox_events is
 comment on column claude_archive.outbox_events.undeliverable_at is
     'Set when the stored envelope is larger than the connected broker accepts, so retrying can never help. The pump skips the row, records last_error = payload_too_large, and the row never makes readiness false.';
 
-comment on column claude_archive.outbox_events.published_stream_seq is
-    'The stream sequence of the broker acknowledgement of the first publish (XR-021 CONTRACTS.md R5-12 rule 2). A deletion that removes a published fact row asks Edge to erase the message at this sequence.';
+comment on column claude_archive.outbox_events.published_stream_seqs is
+    'The stream sequence of every broker acknowledgement the pump received for the row, ascending and without duplicates (XR-021 CONTRACTS.md R6-03 rule 1). A duplicate acknowledgement adds nothing; a republish after the duplicate window adds the new copy. A deletion that removes a published fact row reads this array in the statement that deletes the row and asks Edge to erase every message it names.';
 
 comment on column claude_archive.outbox_events.next_resend_at is
     'Only rows of ai_archive.subject.tombstoned.v1 use the four acknowledgement columns (XR-021 CONTRACTS.md R5-11). The pump publishes a published, unacknowledged tombstone again when this time has passed, and stops when acknowledged_at is set.';

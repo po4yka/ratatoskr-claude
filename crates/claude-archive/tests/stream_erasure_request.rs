@@ -38,8 +38,8 @@ const FACT_TYPES: &str =
     "event_type like 'ai_archive.%' and event_type <> 'ai_archive.subject.tombstoned.v1'";
 const OTHER_USER: &str = "018f0000-0000-7000-8000-0000000000d2";
 
-/// `(event_id, event_type, aggregate_id, tenant_ref, published_stream_seq)` of one fact row.
-type FactRow = (Uuid, String, String, Option<String>, Option<i64>);
+/// `(event_id, event_type, aggregate_id, tenant_ref, published_stream_seqs)` of one fact row.
+type FactRow = (Uuid, String, String, Option<String>, Vec<i64>);
 
 /// One fact row as the outbox holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +47,7 @@ struct Fact {
     event_type: String,
     aggregate: String,
     owner: Option<String>,
-    sequence: Option<i64>,
+    sequences: Vec<u64>,
 }
 
 /// One erasure command as the outbox holds it.
@@ -65,7 +65,7 @@ struct Command {
 async fn publish_all(pool: &PgPool) -> BTreeMap<Uuid, Fact> {
     sqlx::query(&format!(
         "update claude_archive.outbox_events o
-         set published_at = now(), published_stream_seq = 1000 + x.n
+         set published_at = now(), published_stream_seqs = array[1000 + x.n]
          from (select event_id, row_number() over (order by occurred_at, event_id) as n
                from claude_archive.outbox_events where {FACT_TYPES}) x
          where o.event_id = x.event_id"
@@ -78,21 +78,24 @@ async fn publish_all(pool: &PgPool) -> BTreeMap<Uuid, Fact> {
 
 async fn facts(pool: &PgPool) -> BTreeMap<Uuid, Fact> {
     let rows: Vec<FactRow> = sqlx::query_as(&format!(
-        "select event_id, event_type, aggregate_id, tenant_ref, published_stream_seq
+        "select event_id, event_type, aggregate_id, tenant_ref, published_stream_seqs
          from claude_archive.outbox_events where {FACT_TYPES}"
     ))
     .fetch_all(pool)
     .await
     .expect("the facts are readable");
     rows.into_iter()
-        .map(|(id, event_type, aggregate, owner, sequence)| {
+        .map(|(id, event_type, aggregate, owner, sequences)| {
             (
                 id,
                 Fact {
                     event_type,
                     aggregate,
                     owner,
-                    sequence,
+                    sequences: sequences
+                        .into_iter()
+                        .map(|sequence| u64::try_from(sequence).expect("a sequence is positive"))
+                        .collect(),
                 },
             )
         })
@@ -160,8 +163,7 @@ fn sequence_of(
     facts
         .values()
         .find(|fact| fact.event_type == event_type && fact.aggregate.starts_with(aggregate_kind))
-        .and_then(|fact| fact.sequence)
-        .and_then(|sequence| u64::try_from(sequence).ok())
+        .and_then(|fact| fact.sequences.first().copied())
 }
 
 /// What every command must satisfy whatever removed the rows.
@@ -199,10 +201,10 @@ async fn the_row_removal_asks_for_the_erasure_of_every_published_fact_it_deletes
     sqlx::query(
         "insert into claude_archive.outbox_events
           (event_id, event_type, aggregate_type, aggregate_id, envelope, payload_digest,
-           correlation_id, tenant_ref, occurred_at, published_at, published_stream_seq,
+           correlation_id, tenant_ref, occurred_at, published_at, published_stream_seqs,
            acknowledged_at, ack_outcome)
          values ($1, 'ai_archive.subject.tombstoned.v1', 'tombstone', 'ai_archive:x', '{}',
-                 decode(repeat('7a', 32), 'hex'), 'c', $2, now(), now(), 90000, now(), 'applied')",
+                 decode(repeat('7a', 32), 'hex'), 'c', $2, now(), now(), array[90000], now(), 'applied')",
     )
     .bind(Uuid::now_v7())
     .bind(&owner)
@@ -215,7 +217,7 @@ async fn the_row_removal_asks_for_the_erasure_of_every_published_fact_it_deletes
     let issued = commands(pool).await;
     let tombstone_rows: i64 = sqlx::query_scalar(
         "select count(*) from claude_archive.outbox_events
-         where event_type = 'ai_archive.subject.tombstoned.v1' and published_stream_seq = 90000",
+         where event_type = 'ai_archive.subject.tombstoned.v1' and published_stream_seqs = array[90000]::bigint[]",
     )
     .fetch_one(pool)
     .await
@@ -229,7 +231,7 @@ async fn the_row_removal_asks_for_the_erasure_of_every_published_fact_it_deletes
     assert_well_formed(&issued);
     let expected: BTreeSet<u64> = published
         .values()
-        .filter_map(|fact| u64::try_from(fact.sequence?).ok())
+        .flat_map(|fact| fact.sequences.iter().copied())
         .collect();
     assert_eq!(
         named(&issued).get(&owner),
@@ -293,7 +295,7 @@ async fn the_facts_of_a_deleted_archive_under_a_kept_subject_are_erased_too() {
     let gone: BTreeSet<u64> = published
         .iter()
         .filter(|(id, _)| !left.contains_key(id))
-        .filter_map(|(_, fact)| u64::try_from(fact.sequence?).ok())
+        .flat_map(|(_, fact)| fact.sequences.iter().copied())
         .collect();
     let owner = format!("user:{}", cumulative::USER);
     assert_eq!(
@@ -352,8 +354,8 @@ async fn a_fact_replaced_by_an_identical_one_is_erased() {
         .iter()
         .filter(|(_, fact)| fact.event_type == "ai_archive.project.updated.v1")
         .filter(|(_, fact)| fact.aggregate.starts_with("ai_project:"))
-        .min_by_key(|(_, fact)| fact.sequence)
-        .map(|(id, fact)| (*id, fact.sequence))
+        .min_by_key(|(_, fact)| fact.sequences.first().copied())
+        .map(|(id, fact)| (*id, fact.sequences.first().copied()))
         .expect("an updated project fact exists");
     imported.delete_export(imported.exports[2]).await;
     let left = facts(pool).await;
@@ -361,8 +363,7 @@ async fn a_fact_replaced_by_an_identical_one_is_erased() {
     imported.finish().await;
 
     assert_well_formed(&issued);
-    let replaced = u64::try_from(second_exports_project.1.expect("it was published"))
-        .expect("a sequence fits");
+    let replaced = second_exports_project.1.expect("it was published");
     assert!(
         !left.contains_key(&second_exports_project.0),
         "the stored fact was replaced by a new event"
@@ -439,7 +440,7 @@ async fn each_owner_gets_its_own_command_and_a_command_names_at_most_500_sequenc
         published
             .values()
             .filter(|fact| fact.owner.as_deref() == Some(owner))
-            .filter_map(|fact| u64::try_from(fact.sequence?).ok())
+            .flat_map(|fact| fact.sequences.iter().copied())
             .collect()
     };
     let first = format!("user:{}", cumulative::USER);
@@ -517,7 +518,7 @@ async fn a_later_deletion_keeps_an_erasure_request_nobody_published_yet() {
     let owner = format!("user:{}", cumulative::USER);
     let every_published: BTreeSet<u64> = published
         .values()
-        .filter_map(|fact| u64::try_from(fact.sequence?).ok())
+        .flat_map(|fact| fact.sequences.iter().copied())
         .collect();
     assert_eq!(
         named(&after).get(&owner),
@@ -652,7 +653,7 @@ fn sequences_of(published: &BTreeMap<Uuid, Fact>, owner: &str) -> Vec<u64> {
     published
         .values()
         .filter(|fact| fact.owner.as_deref() == Some(owner))
-        .filter_map(|fact| u64::try_from(fact.sequence?).ok())
+        .flat_map(|fact| fact.sequences.iter().copied())
         .collect()
 }
 

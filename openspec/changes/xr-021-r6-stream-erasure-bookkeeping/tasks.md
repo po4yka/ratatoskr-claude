@@ -6,8 +6,8 @@ Documentation: no failing test can precede it.
 
 ## 1. The array column (R6-03 rule 1)
 
-- [ ] 1.1 RED: `crates/claude-archive/tests/stream_sequence.rs` (real broker) fails on the assertion: `published_stream_seqs` equals the one acknowledged sequence after a publish, and a republish inside the duplicate window leaves one element.
-- [ ] 1.2 GREEN: the column in `schema.sql`, `mark_published` appending the sequence ascending without duplicates, `drop_published_fact_rows` reading the array, and every test that named the old column.
+- [x] 1.1 RED: `crates/claude-archive/tests/stream_sequence.rs` (real broker) fails on the assertion: `published_stream_seqs` equals the one acknowledged sequence after a publish, and a republish inside the duplicate window leaves one element.
+- [x] 1.2 GREEN: the column in `schema.sql`, `mark_published` appending the sequence ascending without duplicates, `drop_published_fact_rows` reading the array, and every test that named the old column.
 
 ## 2. The mark must land (R6-03 rule 2)
 

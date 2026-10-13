@@ -1,5 +1,6 @@
 //! The pump records the stream sequence of the broker acknowledgement of every row it publishes
-//! (XR-021 CONTRACTS.md R5-12 rule 2), so a deletion can ask Edge to erase exactly that message.
+//! (XR-021 CONTRACTS.md R5-12 rule 2 and R6-03 rule 1), so a deletion can ask Edge to erase exactly
+//! that message.
 //!
 //! The pump runs against the real `JetStream` of `CLAUDE_ARCHIVE_TEST_NATS_URL`; a missing broker
 //! fails the tests, it never skips them.
@@ -79,15 +80,22 @@ async fn stored_at(stream: &async_nats::jetstream::stream::Stream, event_id: Uui
     found
 }
 
-async fn recorded(db: &TestDatabase, event_id: Uuid) -> Option<i64> {
+/// The sequences the row holds, as the column renders them, or `None` when the column is absent.
+async fn recorded(db: &TestDatabase, event_id: Uuid) -> Option<Vec<i64>> {
     sqlx::query_scalar(
-        "select to_jsonb(o) -> 'published_stream_seq' from claude_archive.outbox_events o
+        "select to_jsonb(o) -> 'published_stream_seqs' from claude_archive.outbox_events o
          where o.event_id = $1",
     )
     .bind(event_id)
     .fetch_one(db.database.pool())
     .await
-    .map(|value: serde_json::Value| value.as_i64())
+    .map(|value: Option<serde_json::Value>| {
+        value?
+            .as_array()?
+            .iter()
+            .map(serde_json::Value::as_i64)
+            .collect()
+    })
     .expect("the row is readable")
 }
 
@@ -124,19 +132,23 @@ async fn the_pump_records_the_sequence_of_the_stream_message() {
     db.cleanup().await.expect("cleanup succeeds");
 
     assert!(matches!(pass, Ok(1)), "{pass:?}");
-    assert_eq!(before, None, "nothing is recorded before the publish");
+    assert_eq!(
+        before,
+        Some(Vec::new()),
+        "nothing is recorded before the publish"
+    );
     let [sequence] = stored.as_slice() else {
         panic!("the stream holds exactly one copy: {stored:?}");
     };
     assert_eq!(
         after,
-        Some(i64::try_from(*sequence).expect("a sequence fits")),
-        "published_stream_seq is the sequence of the stream message"
+        Some(vec![i64::try_from(*sequence).expect("a sequence fits")]),
+        "published_stream_seqs is the one sequence of the stream message"
     );
 }
 
 #[tokio::test]
-async fn a_duplicate_acknowledgement_keeps_the_original_sequence() {
+async fn a_duplicate_acknowledgement_adds_no_second_element() {
     let (jetstream, stream) = events_stream().await;
     let db = TestDatabase::create().await.expect("a disposable database");
     let event_id = enqueue_fact(&db).await;
@@ -148,14 +160,11 @@ async fn a_duplicate_acknowledgement_keeps_the_original_sequence() {
     let first = recorded(&db, event_id).await;
     // The pump died after the broker stored the message and before it marked the row: the next
     // pass publishes the same message id again and the broker answers with a duplicate.
-    sqlx::query(
-        "update claude_archive.outbox_events
-         set published_at = null, published_stream_seq = null where event_id = $1",
-    )
-    .bind(event_id)
-    .execute(db.database.pool())
-    .await
-    .expect("the crash is simulated");
+    sqlx::query("update claude_archive.outbox_events set published_at = null where event_id = $1")
+        .bind(event_id)
+        .execute(db.database.pool())
+        .await
+        .expect("the crash is simulated");
     // Other tests publish into the same stream meanwhile, so the new sequence would differ.
     let pass = publisher.publish_pending_with(&jetstream).await;
     let second = recorded(&db, event_id).await;
@@ -168,9 +177,13 @@ async fn a_duplicate_acknowledgement_keeps_the_original_sequence() {
         1,
         "the broker collapsed the repeated message id"
     );
-    assert!(first.is_some(), "the first publish recorded a sequence");
+    assert_eq!(
+        first.as_ref().map(Vec::len),
+        Some(1),
+        "the first publish recorded one sequence"
+    );
     assert_eq!(
         second, first,
-        "the duplicate acknowledgement carries the original sequence"
+        "the duplicate acknowledgement carries the original sequence and adds no second element"
     );
 }
