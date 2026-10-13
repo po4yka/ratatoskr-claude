@@ -36,7 +36,7 @@ Documentation: no failing test can precede it.
 
 Documentation: no failing test can precede it.
 
-- [ ] 6.1 `DEVELOPMENT.md` drops the "Accepted residual" paragraph and states the protocol (the array, the per-row lock and its 5 s bound, the carried sequences, the pump-originated command and its `request_ref`) and the single residual. `README.md` and the column comment in `schema.sql` follow.
+- [x] 6.1 `DEVELOPMENT.md` drops the "Accepted residual" paragraph and states the protocol (the array, the per-row lock and its 5 s bound, the carried sequences, the pump-originated command and its `request_ref`) and the single residual. `README.md` and the column comment in `schema.sql` follow.
 
 ## 7. Gate
 
