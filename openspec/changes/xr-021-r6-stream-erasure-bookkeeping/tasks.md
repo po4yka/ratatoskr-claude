@@ -11,8 +11,8 @@ Documentation: no failing test can precede it.
 
 ## 2. The mark must land (R6-03 rule 2)
 
-- [ ] 2.1 RED: `mark_published` for a row that no longer exists, or that is already published, returns `OutboxError::MarkLost` and increments `claude_archive_outbox_mark_lost_total`; today it returns `Ok`. The variant is added first and never returned.
-- [ ] 2.2 GREEN: `rows_affected() == 1` is checked, the error is returned and counted, and the pass reports the failure.
+- [x] 2.1 RED: `mark_published` for a row that no longer exists, or that is already published, returns `OutboxError::MarkLost` and increments `claude_archive_outbox_mark_lost_total`; today it returns `Ok`. The variant is added first and never returned.
+- [x] 2.2 GREEN: `rows_affected() == 1` is checked, the error is returned and counted, and the pass reports the failure.
 
 ## 3. Serialize with the deletion (R6-03 rules 2 and 3)
 

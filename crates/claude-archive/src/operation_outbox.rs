@@ -34,6 +34,9 @@ const HEADER_HEADROOM_BYTES: usize = 1024;
 const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
 /// Counts rows marked undeliverable, labelled by their safe class.
 const UNDELIVERABLE_METRIC: &str = "claude_archive_outbox_undeliverable_total";
+/// Counts acknowledged publishes whose mark did not affect exactly one row (XR-021 CONTRACTS.md
+/// R6-03 rule 2).
+const MARK_LOST_METRIC: &str = "claude_archive_outbox_mark_lost_total";
 
 /// The subject an outbox event type is published on, or `None` outside the closed list.
 ///
@@ -265,6 +268,9 @@ impl OutboxPublisher {
                 self.failing.store(true, Ordering::Release);
                 *self.connection.lock().await = None;
             }
+            // The broker holds a copy that no row records: the pass failed even though the broker
+            // answered, and the failure stays until a later pass publishes cleanly.
+            Err(OutboxError::MarkLost) => self.failing.store(true, Ordering::Release),
             Err(_) => {}
         }
         result
@@ -420,7 +426,7 @@ impl OutboxPublisher {
     /// of that acknowledgement (a duplicate acknowledgement carries the original sequence). A
     /// tombstone is also scheduled for its first resend, one interval later.
     async fn mark_published(&self, event_id: Uuid, sequence: u64) -> Result<(), OutboxError> {
-        sqlx::query(
+        let marked = sqlx::query(
             "update claude_archive.outbox_events
              set published_at = now(), last_error = null,
                  published_stream_seqs = (select coalesce(array_agg(distinct s order by s), '{}')
@@ -435,7 +441,12 @@ impl OutboxPublisher {
         .execute(&self.pool)
         .await
         .map_err(OutboxError::Database)?;
-        Ok(())
+        if marked.rows_affected() == 1 {
+            return Ok(());
+        }
+        metrics::counter!(MARK_LOST_METRIC).increment(1);
+        tracing::error!("the mark of an acknowledged archive event did not affect exactly one row");
+        Err(OutboxError::MarkLost)
     }
 
     /// Counts a resend and schedules the next one, doubling the wait up to the cap.
@@ -525,6 +536,9 @@ pub enum OutboxError {
     /// A durable payload could not be encoded for the bus.
     #[error("the archive event payload could not be encoded")]
     Encode(#[source] serde_json::Error),
+    /// The mark of an acknowledged row did not affect exactly one row.
+    #[error("the outbox row of an acknowledged publish was not marked")]
+    MarkLost,
 }
 
 impl OutboxError {
@@ -547,6 +561,75 @@ impl OutboxError {
             self,
             Self::UnknownEventType | Self::EnvelopeMismatch | Self::Encode(_)
         )
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "unit-test scaffolding: a failed setup step must fail the test loudly"
+)]
+mod mark_tests {
+    use super::{OutboxError, OutboxPublisher};
+    use crate::test_support::TestDatabase;
+    use uuid::Uuid;
+
+    async fn insert_row(db: &TestDatabase, published: bool) -> Uuid {
+        let event_id = Uuid::now_v7();
+        sqlx::query(
+            "insert into claude_archive.outbox_events
+              (event_id, event_type, aggregate_type, aggregate_id, envelope, payload_digest,
+               correlation_id, occurred_at, published_at)
+             values ($1, 'ai_archive.conversation.added.v1', 'conversation', 'ai_conversation:x',
+                     '{}', sha256($1::text::bytea), 'c', now(), case when $2 then now() end)",
+        )
+        .bind(event_id)
+        .bind(published)
+        .execute(db.database.pool())
+        .await
+        .expect("the row seeds");
+        event_id
+    }
+
+    /// The Prometheus handle of this test binary, installed once because a recorder is
+    /// process-wide.
+    fn metrics() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+        static HANDLE: std::sync::OnceLock<metrics_exporter_prometheus::PrometheusHandle> =
+            std::sync::OnceLock::new();
+        HANDLE.get_or_init(|| {
+            metrics_exporter_prometheus::PrometheusBuilder::new()
+                .install_recorder()
+                .expect("the first recorder of this process installs")
+        })
+    }
+
+    /// XR-021 CONTRACTS.md R6-03 rule 2: a mark that does not affect exactly one row is a counted
+    /// error, never a silent success, because the broker already holds a copy nobody recorded.
+    #[tokio::test]
+    async fn a_mark_that_finds_no_unpublished_row_is_a_counted_error() {
+        let recorder = metrics();
+        let db = TestDatabase::create().await.expect("a disposable database");
+        let publisher = OutboxPublisher::new(db.database.pool().clone());
+        let deleted = publisher.mark_published(Uuid::now_v7(), 7).await;
+        let already = insert_row(&db, true).await;
+        let published = publisher.mark_published(already, 8).await;
+        let exposition = recorder.render();
+        db.cleanup().await.expect("cleanup succeeds");
+
+        assert!(
+            matches!(deleted, Err(OutboxError::MarkLost)),
+            "a row that no longer exists: {deleted:?}"
+        );
+        assert!(
+            matches!(published, Err(OutboxError::MarkLost)),
+            "a row that is already published: {published:?}"
+        );
+        assert!(
+            exposition
+                .lines()
+                .any(|line| line == "claude_archive_outbox_mark_lost_total 2"),
+            "the counter claude_archive_outbox_mark_lost_total counted both: {exposition}"
+        );
     }
 }
 
