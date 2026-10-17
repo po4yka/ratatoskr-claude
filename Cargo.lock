@@ -1648,7 +1648,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-ai-archive-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=66bdb0c0545363f06137f13687084c21db9b27c5#66bdb0c0545363f06137f13687084c21db9b27c5"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=1756034314a15d3a83d5c7d15b172da502990e98#1756034314a15d3a83d5c7d15b172da502990e98"
 dependencies = [
  "hex",
  "ratatoskr-error-contracts",
@@ -1721,7 +1721,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-error-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=66bdb0c0545363f06137f13687084c21db9b27c5#66bdb0c0545363f06137f13687084c21db9b27c5"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=1756034314a15d3a83d5c7d15b172da502990e98#1756034314a15d3a83d5c7d15b172da502990e98"
 dependencies = [
  "jiff",
  "ratatoskr-identifiers",
@@ -1736,7 +1736,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-event-envelope"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=66bdb0c0545363f06137f13687084c21db9b27c5#66bdb0c0545363f06137f13687084c21db9b27c5"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=1756034314a15d3a83d5c7d15b172da502990e98#1756034314a15d3a83d5c7d15b172da502990e98"
 dependencies = [
  "jiff",
  "ratatoskr-identifiers",
@@ -1751,7 +1751,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-identifiers"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=66bdb0c0545363f06137f13687084c21db9b27c5#66bdb0c0545363f06137f13687084c21db9b27c5"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=1756034314a15d3a83d5c7d15b172da502990e98#1756034314a15d3a83d5c7d15b172da502990e98"
 dependencies = [
  "jiff",
  "regex",
@@ -1765,7 +1765,7 @@ dependencies = [
 [[package]]
 name = "ratatoskr-operation-contracts"
 version = "0.1.0"
-source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=66bdb0c0545363f06137f13687084c21db9b27c5#66bdb0c0545363f06137f13687084c21db9b27c5"
+source = "git+https://github.com/po4yka/ratatoskr-contracts.git?rev=1756034314a15d3a83d5c7d15b172da502990e98#1756034314a15d3a83d5c7d15b172da502990e98"
 dependencies = [
  "jiff",
  "ratatoskr-ai-archive-contracts",
@@ -3310,9 +3310,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "711e8c9646791c49b7eb799a19c4ae70a9b8372ddc6a1fa4778defd1e2aa5d5e"
 dependencies = [
  "crc32fast",
  "flate2",

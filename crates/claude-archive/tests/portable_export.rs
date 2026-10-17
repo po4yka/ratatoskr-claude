@@ -101,7 +101,8 @@ fn member_names(zip: &mut zip::ZipArchive<Cursor<Vec<u8>>>) -> Vec<String> {
             zip.by_index(index)
                 .expect("member must be readable")
                 .name()
-                .to_owned()
+                .expect("member name must decode")
+                .into_owned()
         })
         .collect()
 }
@@ -247,7 +248,8 @@ fn identical_state_produces_byte_identical_zip() {
                 .by_index(index)
                 .expect("member must be readable")
                 .name()
-                .to_owned()
+                .expect("member name must decode")
+                .into_owned()
         })
         .collect::<Vec<_>>();
     assert_eq!(
