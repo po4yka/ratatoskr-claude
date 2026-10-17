@@ -321,3 +321,29 @@ fn html_and_nested_archives_are_quarantined_without_execution() {
     );
     remove(&root);
 }
+
+#[test]
+fn inspector_refuses_malformed_utf8_filename() {
+    let archive = malformed_utf8_name(zip_with_files(&[("entry.json", b"{}")]));
+    let (root, store) = open_store("invalid-utf8-name");
+    let raw = store_archive(&store, &archive);
+    let result = inspector_with(|_| {}).inspect(&store, &raw);
+    remove(&root);
+    assert!(matches!(result, Err(ArchiveError::UnsafePath)));
+}
+
+fn malformed_utf8_name(mut bytes: Vec<u8>) -> Vec<u8> {
+    for (signature, flags_offset, name_offset) in [(b"PK\x03\x04", 7, 30), (b"PK\x01\x02", 9, 46)] {
+        let header = bytes
+            .windows(4)
+            .position(|window| window == signature)
+            .expect("synthetic ZIP header exists");
+        *bytes
+            .get_mut(header + flags_offset)
+            .expect("flags byte exists") |= 0x08;
+        *bytes
+            .get_mut(header + name_offset)
+            .expect("filename byte exists") = 0xff;
+    }
+    bytes
+}
